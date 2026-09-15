@@ -86,8 +86,9 @@ int main() {
     };
 
     // This is intentionally coarse. The surfacer refines this MTet grid in place.
+    // Offset x by 0.05 so the ridge x=0 lies between, not on, grid planes.
     mtet::MTetMesh adaptive_grid = mtet::generate_tet_grid(
-        {4, 4, 4}, {-1, -1, -1}, {1, 1, 1}, mtet::TET6);
+        {4, 4, 4}, {-1.05, -1, -1}, {0.95, 1, 1}, mtet::TET6);
     const std::size_t coarse_vertex_count = adaptive_grid.get_num_vertices();
     const std::size_t coarse_tet_count = adaptive_grid.get_num_tets();
 
