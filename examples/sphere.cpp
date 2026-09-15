@@ -126,8 +126,8 @@ int main() {
     SurfaceOptions adaptive_options;
     adaptive_options.surface_target = RefinementTarget::ridges;
     adaptive_options.longest_edge_refinement.target = RefinementTarget::ridges;
-    adaptive_options.longest_edge_refinement.max_splits = 300;
-    adaptive_options.longest_edge_refinement.minimum_edge_length = 0.025;
+    adaptive_options.longest_edge_refinement.max_splits = 5000;
+    adaptive_options.longest_edge_refinement.minimum_edge_length = 0.005;
 
     const auto adaptive_start = std::chrono::steady_clock::now();
     const SurfaceMesh adaptive_surface = extract_height_ridges(field, adaptive_grid, adaptive_options);
