@@ -134,6 +134,15 @@ evaluations per uncached point, so start from a modest coarse grid for GeoUDF.
 A batched precomputed-sample API is the next performance step for
 high-resolution neural UDFs.
 
+To test that finite-difference path independently of a trained model, run the
+known-sphere smoke test. It uses a smooth scalar field with its ridge exactly
+at radius `0.6`, verifies the resulting radial error, and writes
+`numerical_hessian_sphere.ply`:
+
+```bash
+python examples/python_numerical_hessian_sphere.py
+```
+
 The API accepts either a scalar field (central numerical derivatives are used)
 or, preferably, exact gradient and Hessian callbacks:
 
