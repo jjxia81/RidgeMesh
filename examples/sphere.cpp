@@ -87,7 +87,7 @@ int main() {
 
     // This is intentionally coarse. The surfacer refines this MTet grid in place.
     mtet::MTetMesh adaptive_grid = mtet::generate_tet_grid(
-        {9, 8, 8}, {-1, -1, -1}, {1, 1, 1}, mtet::TET6);
+        {4, 4, 4}, {-1, -1, -1}, {1, 1, 1}, mtet::TET6);
     const std::size_t coarse_vertex_count = adaptive_grid.get_num_vertices();
     const std::size_t coarse_tet_count = adaptive_grid.get_num_tets();
 
