@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 project(ridge_surface VERSION 0.1.0 LANGUAGES CXX)
 
+# The native Python module is a shared object on Linux. All static libraries
+# linked into it (RidgeMesh and MTet) must therefore be compiled with -fPIC.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 add_subdirectory(third_party/mtet EXCLUDE_FROM_ALL)
 add_subdirectory(third_party/eigen EXCLUDE_FROM_ALL)
 
