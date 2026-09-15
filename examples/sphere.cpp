@@ -1,4 +1,5 @@
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -104,28 +105,46 @@ int main() {
         },
     };
 
-    // This is intentionally coarse. The surfacer refines this MTet grid in place.
     // Offset x by 0.05 so no symmetry plane passes exactly through all samples.
+    constexpr std::array<std::size_t, 3> uniform_resolution{64, 64, 64};
+    mtet::MTetMesh uniform_grid = mtet::generate_tet_grid(
+        uniform_resolution, {-1.05, -1, -1}, {0.95, 1, 1}, mtet::TET6);
+    SurfaceOptions uniform_options;
+    uniform_options.surface_target = RefinementTarget::ridges;
+
+    const auto uniform_start = std::chrono::steady_clock::now();
+    const SurfaceMesh uniform_surface = extract_height_ridges(field, uniform_grid, uniform_options);
+    const auto uniform_elapsed = std::chrono::steady_clock::now() - uniform_start;
+    write_surface_ply(uniform_surface, "uniform_64_sphere.ply");
+
+    // This coarse 4x4x4 grid is refined in place around the spherical ridge.
     mtet::MTetMesh adaptive_grid = mtet::generate_tet_grid(
         {4, 4, 4}, {-1.05, -1, -1}, {0.95, 1, 1}, mtet::TET6);
     const std::size_t coarse_vertex_count = adaptive_grid.get_num_vertices();
     const std::size_t coarse_tet_count = adaptive_grid.get_num_tets();
 
-    SurfaceOptions options;
-    options.surface_target = RefinementTarget::ridges;
-    options.longest_edge_refinement.target = RefinementTarget::ridges;
-    options.longest_edge_refinement.max_splits = 300;
-    options.longest_edge_refinement.minimum_edge_length = 0.025;
+    SurfaceOptions adaptive_options;
+    adaptive_options.surface_target = RefinementTarget::ridges;
+    adaptive_options.longest_edge_refinement.target = RefinementTarget::ridges;
+    adaptive_options.longest_edge_refinement.max_splits = 300;
+    adaptive_options.longest_edge_refinement.minimum_edge_length = 0.025;
 
-    const SurfaceMesh surface = extract_height_ridges(field, adaptive_grid, options);
-    write_surface_ply(surface, "ridge_example.ply");
+    const auto adaptive_start = std::chrono::steady_clock::now();
+    const SurfaceMesh adaptive_surface = extract_height_ridges(field, adaptive_grid, adaptive_options);
+    const auto adaptive_elapsed = std::chrono::steady_clock::now() - adaptive_start;
+    write_surface_ply(adaptive_surface, "ridge_example.ply");
     write_grid_wireframe_ply(adaptive_grid, "adaptive_grid_wireframe.ply");
 
-    std::cout << "coarse grid: " << coarse_vertex_count << " vertices, " << coarse_tet_count << " tetrahedra\n"
+    std::cout << "uniform 64x64x64 grid: " << uniform_grid.get_num_vertices() << " vertices, "
+              << uniform_grid.get_num_tets() << " tetrahedra\n"
+              << "uniform surface: " << uniform_surface.vertices.size() << " dual vertices, "
+              << uniform_surface.ridge_triangles.size() << " ridge triangles, "
+              << "time " << std::chrono::duration<double>(uniform_elapsed).count() << " seconds\n"
+              << "adaptive coarse grid: " << coarse_vertex_count << " vertices, " << coarse_tet_count << " tetrahedra\n"
               << "adaptive grid: " << adaptive_grid.get_num_vertices() << " vertices, "
               << adaptive_grid.get_num_tets() << " tetrahedra\n"
-              << "surface: " << surface.vertices.size() << " dual vertices, "
-              << surface.ridge_triangles.size() << " ridge triangles, "
-              << surface.valley_triangles.size() << " valley triangles\n"
-              << "wrote ridge_example.ply and adaptive_grid_wireframe.ply\n";
+              << "adaptive surface: " << adaptive_surface.vertices.size() << " dual vertices, "
+              << adaptive_surface.ridge_triangles.size() << " ridge triangles, "
+              << "time " << std::chrono::duration<double>(adaptive_elapsed).count() << " seconds\n"
+              << "wrote uniform_64_sphere.ply, ridge_example.ply, and adaptive_grid_wireframe.ply\n";
 }

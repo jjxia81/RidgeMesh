@@ -164,7 +164,9 @@ exactly on a grid-vertex plane. For example, use an odd resolution along the
 normal direction or shift the bounds slightly. Zero-valued whole edges are
 deliberately ignored because they have no unique dual-cell topology.
 
-The `ridge_example` program deliberately starts from a coarse MTet grid,
-enables 300 ridge-driven longest-edge splits, and writes two ASCII PLY files
-in its working directory: `ridge_example.ply` is the extracted ridge surface;
-`adaptive_grid_wireframe.ply` contains the final MTet vertex/edge wireframe.
+The `ridge_example` program compares a uniform `64 x 64 x 64` TET6 grid with
+an adaptively refined coarse MTet grid. It writes three ASCII PLY files in its
+working directory: `uniform_64_sphere.ply` is the dense uniform-grid ridge;
+`ridge_example.ply` is the adaptive-grid ridge; and
+`adaptive_grid_wireframe.ply` contains the final adaptive MTet vertex/edge
+wireframe.
