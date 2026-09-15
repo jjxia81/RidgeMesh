@@ -43,6 +43,18 @@ if(RIDGE_SURFACE_BUILD_PYTHON)
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       ${CMAKE_CURRENT_SOURCE_DIR}/python/ridge_surface_plot.py
       $<TARGET_FILE_DIR:ridge_surface_python>)
+
+  # Used by scikit-build-core to create the installable ``ridgemesh`` package.
+  install(TARGETS ridge_surface_python
+    LIBRARY DESTINATION ridgemesh
+    RUNTIME DESTINATION ridgemesh)
+  install(FILES
+    python/ridgemesh/__init__.py
+    python/ridgemesh/torch_adapter.py
+    DESTINATION ridgemesh)
+  install(FILES python/ridge_surface_plot.py
+    DESTINATION ridgemesh
+    RENAME plot.py)
 endif()
 
 if(WIN32)
@@ -55,4 +67,8 @@ if(WIN32)
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
         $<TARGET_FILE:nanothread> $<TARGET_FILE_DIR:${target}>)
   endforeach()
+endif()
+
+if(WIN32 AND RIDGE_SURFACE_BUILD_PYTHON)
+  install(FILES $<TARGET_FILE:nanothread> DESTINATION ridgemesh)
 endif()

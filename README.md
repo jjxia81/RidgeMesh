@@ -32,8 +32,16 @@ This uses the installed Visual Studio C++ compiler. The build produces
 
 ## Python
 
-The default build also produces a native module named `ridge_surface` in the
-build output directory. On Windows, after a Release build:
+Install RidgeMesh as a Python package (including its native extension):
+
+```bash
+python -m pip install ".[torch,plot]"
+```
+
+The `torch` extra supplies the GeoUDF/PyTorch adapter; `plot` supplies
+Matplotlib. The package can then be imported as `ridgemesh`. The default CMake
+build also produces a native module named `ridge_surface` in the build output
+directory for direct local use. On Windows, after a Release build:
 
 ```powershell
 $env:PYTHONPATH = "$(Resolve-Path .\vs2022\Release)"
@@ -81,6 +89,45 @@ figure.savefig("sphere_radial_error.png", dpi=180)
 
 For accuracy and speed, use `extract_height_ridges_from_derivatives` with
 Python callbacks returning a length-3 gradient and a 3-by-3 Hessian.
+
+### PyTorch / GeoUDF
+
+`extract_torch_udf` accepts a model following GeoUDF's
+`model(input_dict, query)` convention. It evaluates the scalar UDF and uses
+PyTorch autograd to obtain the gradient and Hessian required by RidgeMesh;
+the model's separately learned `udf_grad` output is not used as a Hessian
+substitute.
+
+```python
+import ridgemesh as rm
+
+options = rm.SurfaceOptions()
+options.nx = options.ny = options.nz = 12
+options.surface_target = rm.RefinementTarget.ridges
+options.longest_edge_refinement.target = rm.RefinementTarget.ridges
+options.longest_edge_refinement.max_splits = 1000
+options.longest_edge_refinement.minimum_edge_length = .01
+
+# `model` is a loaded GeoUDF torch model and `input_dict` is its prepared
+# context (for example, its point cloud). The adapter constructs queries with
+# GeoUDF's expected shape (1, 3, 1).
+mesh = rm.extract_torch_udf(
+    model,
+    input_dict,
+    rm.Bounds3D(rm.Vec3(-1, -1, -1), rm.Vec3(1, 1, 1)),
+    options,
+    device="cuda",
+)
+
+from ridgemesh import plot
+figure, axes = plot.plot_mesh(mesh, show_valleys=False, title="GeoUDF ridge")
+figure.savefig("geoudf_ridge.png", dpi=180)
+```
+
+The current native callback interface evaluates autograd derivatives per query
+point, with caching when the gradient and Hessian are requested at the same
+location. Start from a modest coarse grid for GeoUDF. A batched precomputed
+sample API is the next performance step for high-resolution neural UDFs.
 
 The API accepts either a scalar field (central numerical derivatives are used)
 or, preferably, exact gradient and Hessian callbacks:
