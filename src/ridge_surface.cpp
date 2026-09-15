@@ -8,6 +8,8 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <unordered_map>
 
@@ -44,6 +46,12 @@ struct VertexSample {
     Vec3 gradient;
     OrderedEigenSystem eigensystem;
     bool is_convex_dominant;
+};
+
+struct RefinementCandidate {
+    mtet::TetId tet_id;
+    std::uint8_t longest_local_edge;
+    double longest_edge_length;
 };
 
 OrderedEigenSystem compute_eigensystem(const Mat3& matrix) {
@@ -88,6 +96,156 @@ TetGrid make_kuhn_grid(const Bounds3D& bounds, int nx, int ny, int nz) {
 Vec3 position_of(const mtet::MTetMesh& mesh, mtet::VertexId vertex_id) {
     const auto position = mesh.get_vertex(vertex_id);
     return {position[0], position[1], position[2]};
+}
+
+VertexSample evaluate_vertex_sample(const DifferentialField3D& field, Vec3 point) {
+    Mat3 negated_hessian = field.hessian(point);
+    for (auto& row : negated_hessian) {
+        for (double& value : row) {
+            value = -value;
+        }
+    }
+
+    const OrderedEigenSystem eigensystem = compute_eigensystem(negated_hessian);
+    return {
+        field.gradient(point),
+        eigensystem,
+        eigensystem.values[0] + eigensystem.values[2] > 0.0,
+    };
+}
+
+void add_vertex_sample(
+    const mtet::MTetMesh& mesh,
+    const DifferentialField3D& field,
+    mtet::VertexId vertex_id,
+    std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id) {
+    samples_by_vertex_id.try_emplace(
+        vertex_id.value_of(), evaluate_vertex_sample(field, position_of(mesh, vertex_id)));
+}
+
+int sign_consistency(const std::array<double, 4>& values) {
+    const auto sign_of = [](double value) {
+        return value > 0.0 ? 1 : (value < 0.0 ? -1 : 0);
+    };
+    const int common_sign = sign_of(values[0]);
+    for (std::size_t index = 1; index < values.size(); ++index) {
+        const double value = values[index];
+        if (common_sign != sign_of(value)) {
+            return 0;
+        }
+    }
+    return common_sign;
+}
+
+bool has_condition_crossing(
+    std::span<const mtet::VertexId, 4> tet_vertices,
+    const std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id,
+    int direction_index) {
+    const Vec3 reference_direction =
+        samples_by_vertex_id.at(tet_vertices[0].value_of()).eigensystem.vectors[direction_index];
+    std::array<double, 4> values;
+    for (std::size_t index = 0; index < tet_vertices.size(); ++index) {
+        const VertexSample& sample = samples_by_vertex_id.at(tet_vertices[index].value_of());
+        Vec3 direction = sample.eigensystem.vectors[direction_index];
+        if (dot(direction, reference_direction) < 0.0) {
+            direction = direction * -1.0;
+        }
+        values[index] = dot(sample.gradient, direction);
+    }
+    return sign_consistency(values) == 0;
+}
+
+bool should_refine_tet(
+    std::span<const mtet::VertexId, 4> tet_vertices,
+    const std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id,
+    RefinementTarget target) {
+    if (target == RefinementTarget::none) {
+        return false;
+    }
+
+    std::array<double, 4> curvature_sums;
+    for (std::size_t index = 0; index < tet_vertices.size(); ++index) {
+        const OrderedEigenSystem& eigen =
+            samples_by_vertex_id.at(tet_vertices[index].value_of()).eigensystem;
+        curvature_sums[index] = eigen.values[0] + eigen.values[2];
+    }
+    const int convexity = sign_consistency(curvature_sums);
+    const bool ridge_crossing = convexity >= 0 &&
+        has_condition_crossing(tet_vertices, samples_by_vertex_id, 0);
+    const bool valley_crossing = convexity <= 0 &&
+        has_condition_crossing(tet_vertices, samples_by_vertex_id, 2);
+
+    switch (target) {
+    case RefinementTarget::ridges:
+        return ridge_crossing;
+    case RefinementTarget::valleys:
+        return valley_crossing;
+    case RefinementTarget::ridges_and_valleys:
+        return ridge_crossing || valley_crossing;
+    case RefinementTarget::none:
+        return false;
+    }
+    return false;
+}
+
+std::optional<RefinementCandidate> find_longest_refinement_candidate(
+    const mtet::MTetMesh& mesh,
+    const std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id,
+    RefinementTarget target) {
+    constexpr std::array<std::array<int, 2>, 6> kLocalEdges{{
+        {{0, 1}}, {{1, 2}}, {{2, 0}}, {{0, 3}}, {{1, 3}}, {{2, 3}},
+    }};
+    std::optional<RefinementCandidate> best_candidate;
+
+    mesh.seq_foreach_tet([&](mtet::TetId tet_id, auto tet_vertices) {
+        if (!should_refine_tet(tet_vertices, samples_by_vertex_id, target)) {
+            return;
+        }
+
+        std::uint8_t longest_local_edge = 0;
+        double longest_edge_length = -1.0;
+        for (std::uint8_t edge_index = 0; edge_index < kLocalEdges.size(); ++edge_index) {
+            const auto [first_index, second_index] = kLocalEdges[edge_index];
+            const double edge_length = norm(
+                position_of(mesh, tet_vertices[first_index]) - position_of(mesh, tet_vertices[second_index]));
+            if (edge_length > longest_edge_length) {
+                longest_edge_length = edge_length;
+                longest_local_edge = edge_index;
+            }
+        }
+
+        if (!best_candidate || longest_edge_length > best_candidate->longest_edge_length) {
+            best_candidate = {tet_id, longest_local_edge, longest_edge_length};
+        }
+    });
+    return best_candidate;
+}
+
+int refine_longest_edges(
+    TetGrid& grid,
+    const DifferentialField3D& field,
+    const LongestEdgeRefinementOptions& options,
+    std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id) {
+    if (options.target == RefinementTarget::none || options.max_splits == 0) {
+        return 0;
+    }
+
+    int split_count = 0;
+    while (split_count < options.max_splits) {
+        const auto candidate =
+            find_longest_refinement_candidate(grid.mesh, samples_by_vertex_id, options.target);
+        if (!candidate || candidate->longest_edge_length <= options.minimum_edge_length) {
+            break;
+        }
+
+        const mtet::EdgeId edge_id = grid.mesh.get_edge(candidate->tet_id, candidate->longest_local_edge);
+        const auto [new_vertex_id, first_half_edge, second_half_edge] = grid.mesh.split_edge(edge_id);
+        (void)first_half_edge;
+        (void)second_half_edge;
+        add_vertex_sample(grid.mesh, field, new_vertex_id, samples_by_vertex_id);
+        ++split_count;
+    }
+    return split_count;
 }
 
 // Build the compact edge -> incident-tetrahedra table needed for dual surfacing.
@@ -275,32 +433,27 @@ SurfaceMesh extract_height_ridges(
     const DifferentialField3D& field,
     const Bounds3D& bounds,
     const SurfaceOptions& options) {
-    if (!field.gradient || !field.hessian || options.nx < 1 || options.ny < 1 || options.nz < 1) {
+    if (!field.gradient || !field.hessian || options.nx < 1 || options.ny < 1 || options.nz < 1 ||
+        options.longest_edge_refinement.max_splits < 0 ||
+        options.longest_edge_refinement.minimum_edge_length < 0.0) {
         throw std::invalid_argument("valid field and positive grid resolution required");
     }
 
-    const TetGrid tet_grid = make_kuhn_grid(bounds, options.nx, options.ny, options.nz);
+    TetGrid tet_grid = make_kuhn_grid(bounds, options.nx, options.ny, options.nz);
 
     // 1. Evaluate derivatives and classify each grid vertex.
     std::unordered_map<std::uint64_t, VertexSample> samples_by_vertex_id;
     samples_by_vertex_id.reserve(tet_grid.mesh.get_num_vertices());
     tet_grid.mesh.seq_foreach_vertex([&](mtet::VertexId vertex_id, auto position) {
-        const Vec3 point = {position[0], position[1], position[2]};
-
-        Mat3 negated_hessian = field.hessian(point);
-        for (auto& row : negated_hessian) {
-            for (double& value : row) value = -value;
-        }
-
-        const OrderedEigenSystem eigensystem = compute_eigensystem(negated_hessian);
-        samples_by_vertex_id.emplace(vertex_id.value_of(), VertexSample{
-            field.gradient(point),
-            eigensystem,
-            eigensystem.values[0] + eigensystem.values[2] > 0.0,
-        });
+        samples_by_vertex_id.emplace(
+            vertex_id.value_of(), evaluate_vertex_sample(field, {position[0], position[1], position[2]}));
     });
 
-    // 2. Locate eligible ridge and valley crossings on grid edges.
+    // 2. Adapt the coarse MTet grid before locating surface crossings.
+    // MTet splits the entire edge one-ring, preserving a conforming tet mesh.
+    refine_longest_edges(tet_grid, field, options.longest_edge_refinement, samples_by_vertex_id);
+
+    // 3. Locate eligible ridge and valley crossings on grid edges.
     const std::size_t tet_count = tet_grid.mesh.get_num_tets();
     std::vector<Vec3> crossing_sum_by_tet(tet_count);
     std::vector<int> crossing_count_by_tet(tet_count);
@@ -334,7 +487,7 @@ SurfaceMesh extract_height_ridges(
         }
     }
 
-    // 3. Create one dual vertex per active tetrahedron.
+    // 4. Create one dual vertex per active tetrahedron.
     SurfaceMesh surface;
     std::vector<std::size_t> surface_vertex_by_tet(tet_count, kNoSurfaceVertex);
     for (std::size_t tet_index = 0; tet_index < tet_count; ++tet_index) {
@@ -344,7 +497,7 @@ SurfaceMesh extract_height_ridges(
             crossing_sum_by_tet[tet_index] / static_cast<double>(crossing_count_by_tet[tet_index]));
     }
 
-    // 4. Make one dual polygon per crossing edge and split it into triangles.
+    // 5. Make one dual polygon per crossing edge and split it into triangles.
     append_surface_polygons(crossing_edges, 1, tet_grid.mesh, surface.vertices,
         surface_vertex_by_tet, surface.ridge_triangles);
     append_surface_polygons(crossing_edges, -1, tet_grid.mesh, surface.vertices,

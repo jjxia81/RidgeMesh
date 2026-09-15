@@ -34,9 +34,28 @@ struct DifferentialField3D {
 };
 
 struct Bounds3D { Vec3 min, max; };
+
+enum class RefinementTarget {
+  none,
+  ridges,
+  valleys,
+  ridges_and_valleys,
+};
+
+// Adaptive, conforming longest-edge bisection of the initial TET6 grid.
+// A zero minimum_edge_length matches the notebook: every tetrahedron that can
+// contain the selected ridge/valley condition is eligible until max_splits.
+struct LongestEdgeRefinementOptions {
+  RefinementTarget target = RefinementTarget::none;
+  int max_splits = 0;
+  double minimum_edge_length = 0.0;
+};
+
 struct SurfaceOptions {
   int nx = 32, ny = 32, nz = 32;       // cells along x/y/z
-  bool subdivide_roots = true;          // Newton-like bisection used by the notebook
+  // The coarse TET6 grid is refined before surfacing when enabled.
+  LongestEdgeRefinementOptions longest_edge_refinement;
+  bool subdivide_roots = true;          // bracket-preserving root refinement
   int root_iterations = 4;
   double root_tolerance = 1e-7;
   double finite_difference_step = 1e-4; // only used by the scalar-field overload

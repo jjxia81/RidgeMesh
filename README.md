@@ -89,6 +89,40 @@ SurfaceOptions opt; opt.nx = opt.ny = opt.nz = 64;
 SurfaceMesh result = extract_height_ridges(f, {{-1,-1,-1}, {1,1,1}}, opt);
 ```
 
+## Adaptive longest-edge refinement
+
+`nx`, `ny`, and `nz` define a coarse initial TET6 grid.  Enable the optional
+MTet-backed adaptive stage to split the globally longest eligible edge before
+surface extraction:
+
+```cpp
+SurfaceOptions opt;
+opt.nx = opt.ny = opt.nz = 12; // coarse starting grid
+opt.longest_edge_refinement.target = RefinementTarget::ridges_and_valleys;
+opt.longest_edge_refinement.max_splits = 500;
+opt.longest_edge_refinement.minimum_edge_length = 0.01; // optional stop limit
+
+SurfaceMesh result = extract_height_ridges(f, bounds, opt);
+```
+
+The refinement criterion mirrors `refineLongestEdge` in the notebook. For
+each tet, it aligns the selected Hessian eigenvectors, tests whether
+`gradient dot eigenvector` has mixed signs at its four vertices, and applies
+the convex/concave classification to select ridges, valleys, or both. The
+eligible tet with the longest edge is selected next. `MTetMesh::split_edge()`
+splits the full incident-edge ring, so the mesh remains conforming; derivatives
+are evaluated only for the midpoint vertex created by that split.
+
+Python exposes the same settings:
+
+```python
+refine = rs.LongestEdgeRefinementOptions()
+refine.target = rs.RefinementTarget.ridges_and_valleys
+refine.max_splits = 500
+refine.minimum_edge_length = 0.01
+options.longest_edge_refinement = refine
+```
+
 `result.vertices` are the dual vertices (one centroid for each active Kuhn
 tetrahedron); `ridge_triangles` and `valley_triangles` index that array.
 

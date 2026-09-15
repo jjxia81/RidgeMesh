@@ -79,11 +79,24 @@ PYBIND11_MODULE(ridge_surface, module) {
         .def_readwrite("min", &Bounds3D::min)
         .def_readwrite("max", &Bounds3D::max);
 
+    py::enum_<RefinementTarget>(module, "RefinementTarget")
+        .value("none", RefinementTarget::none)
+        .value("ridges", RefinementTarget::ridges)
+        .value("valleys", RefinementTarget::valleys)
+        .value("ridges_and_valleys", RefinementTarget::ridges_and_valleys);
+
+    py::class_<LongestEdgeRefinementOptions>(module, "LongestEdgeRefinementOptions")
+        .def(py::init<>())
+        .def_readwrite("target", &LongestEdgeRefinementOptions::target)
+        .def_readwrite("max_splits", &LongestEdgeRefinementOptions::max_splits)
+        .def_readwrite("minimum_edge_length", &LongestEdgeRefinementOptions::minimum_edge_length);
+
     py::class_<SurfaceOptions>(module, "SurfaceOptions")
         .def(py::init<>())
         .def_readwrite("nx", &SurfaceOptions::nx)
         .def_readwrite("ny", &SurfaceOptions::ny)
         .def_readwrite("nz", &SurfaceOptions::nz)
+        .def_readwrite("longest_edge_refinement", &SurfaceOptions::longest_edge_refinement)
         .def_readwrite("subdivide_roots", &SurfaceOptions::subdivide_roots)
         .def_readwrite("root_iterations", &SurfaceOptions::root_iterations)
         .def_readwrite("root_tolerance", &SurfaceOptions::root_tolerance)
