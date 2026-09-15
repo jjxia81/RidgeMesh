@@ -8,7 +8,7 @@ adapter obtains both gradient and Hessian with ``torch.autograd``.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Callable
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .ridge_surface import Bounds3D, SurfaceOptions, Vec3, extract_height_ridges_from_derivatives
 
@@ -45,9 +45,9 @@ class TorchFieldAdapter:
     def __init__(
         self,
         model: Callable,
-        context: Mapping[str, Any] | None = None,
+        context: Optional[Mapping[str, Any]] = None,
         *,
-        device: str | None = None,
+        device: Optional[str] = None,
         dtype=None,
         move_context: bool = True,
     ):
@@ -57,7 +57,10 @@ class TorchFieldAdapter:
         self.device = torch.device(device) if device is not None else self._model_device(model)
         self.dtype = dtype if dtype is not None else torch.float32
         self.context = _move_tensors(context or {}, self.device) if move_context else (context or {})
-        self._cache: dict[tuple[float, float, float], tuple[tuple[float, float, float], list[list[float]]]] = {}
+        self._cache: Dict[
+            Tuple[float, float, float],
+            Tuple[Tuple[float, float, float], List[List[float]]],
+        ] = {}
 
         if hasattr(model, "eval"):
             model.eval()
@@ -77,7 +80,7 @@ class TorchFieldAdapter:
             if "udf" not in output:
                 raise KeyError("model mapping output must contain a 'udf' tensor")
             return output["udf"]
-        if isinstance(output, tuple | list):
+        if isinstance(output, (tuple, list)):
             return output[0]
         return output
 
@@ -122,11 +125,11 @@ class TorchFieldAdapter:
 
 def extract_torch_udf(
     model: Callable,
-    context: Mapping[str, Any] | None,
+    context: Optional[Mapping[str, Any]],
     bounds: Bounds3D,
-    options: SurfaceOptions | None = None,
+    options: Optional[SurfaceOptions] = None,
     *,
-    device: str | None = None,
+    device: Optional[str] = None,
     dtype=None,
 ):
     """Extract a ridge/valley mesh from a PyTorch UDF such as GeoUDF.

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Literal, Mapping
+from typing import Callable, Literal, Mapping, Optional
 
 import numpy as np
 
@@ -75,7 +75,7 @@ def plot_mesh(
     show_valleys: bool = True,
     ridge_color: str = "tab:red",
     valley_color: str = "tab:blue",
-    title: str | None = None,
+    title: Optional[str] = None,
     ax=None,
 ):
     """Plot a ``ridge_surface.SurfaceMesh`` in a Matplotlib 3D axes."""

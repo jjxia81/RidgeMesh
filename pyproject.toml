@@ -7,7 +7,7 @@ name = "ridgemesh"
 version = "0.1.0"
 description = "Strong height-ridge and valley extraction on MTet grids"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [{name = "RidgeMesh contributors"}]
 dependencies = ["numpy>=1.23"]
