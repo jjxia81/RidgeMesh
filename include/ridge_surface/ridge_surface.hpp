@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include <mtet/mtet.h>
+
 namespace ridge_surface {
 
 struct Vec3 {
@@ -72,6 +74,12 @@ struct SurfaceMesh {
 // The output is a dual mesh: one vertex per active tetrahedron.
 SurfaceMesh extract_height_ridges(const DifferentialField3D& field,
                                   const Bounds3D& bounds,
+                                  const SurfaceOptions& options = {});
+
+// Surface an existing coarse MTet grid. When longest_edge_refinement is
+// enabled, this mesh is refined in place; MTet remains its sole owner.
+SurfaceMesh extract_height_ridges(const DifferentialField3D& field,
+                                  mtet::MTetMesh& coarse_grid,
                                   const SurfaceOptions& options = {});
 
 // Convenience overload. Derivatives are central finite differences; provide

@@ -37,11 +37,6 @@ struct CrossingEdge {
     int label; // +1 = ridge, -1 = valley.
 };
 
-// MTet is the only owner of the oriented TET6 grid and its coordinates.
-struct TetGrid {
-    mtet::MTetMesh mesh;
-};
-
 struct VertexSample {
     Vec3 gradient;
     OrderedEigenSystem eigensystem;
@@ -81,16 +76,13 @@ OrderedEigenSystem compute_eigensystem(const Mat3& matrix) {
     return result;
 }
 
-TetGrid make_kuhn_grid(const Bounds3D& bounds, int nx, int ny, int nz) {
-    TetGrid grid;
+mtet::MTetMesh make_kuhn_grid(const Bounds3D& bounds, int nx, int ny, int nz) {
     // MTet's TET6 is an oriented, six-tetrahedra-per-cell Kuhn grid.
-    grid.mesh = mtet::generate_tet_grid(
+    return mtet::generate_tet_grid(
         {static_cast<std::size_t>(nx), static_cast<std::size_t>(ny), static_cast<std::size_t>(nz)},
         {static_cast<float>(bounds.min.x), static_cast<float>(bounds.min.y), static_cast<float>(bounds.min.z)},
         {static_cast<float>(bounds.max.x), static_cast<float>(bounds.max.y), static_cast<float>(bounds.max.z)},
         mtet::TET6);
-
-    return grid;
 }
 
 Vec3 position_of(const mtet::MTetMesh& mesh, mtet::VertexId vertex_id) {
@@ -221,8 +213,8 @@ std::optional<RefinementCandidate> find_longest_refinement_candidate(
     return best_candidate;
 }
 
-int refine_longest_edges(
-    TetGrid& grid,
+int refine_longest_edges_in_place(
+    mtet::MTetMesh& mesh,
     const DifferentialField3D& field,
     const LongestEdgeRefinementOptions& options,
     std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id) {
@@ -233,28 +225,28 @@ int refine_longest_edges(
     int split_count = 0;
     while (split_count < options.max_splits) {
         const auto candidate =
-            find_longest_refinement_candidate(grid.mesh, samples_by_vertex_id, options.target);
+            find_longest_refinement_candidate(mesh, samples_by_vertex_id, options.target);
         if (!candidate || candidate->longest_edge_length <= options.minimum_edge_length) {
             break;
         }
 
-        const mtet::EdgeId edge_id = grid.mesh.get_edge(candidate->tet_id, candidate->longest_local_edge);
-        const auto [new_vertex_id, first_half_edge, second_half_edge] = grid.mesh.split_edge(edge_id);
+        const mtet::EdgeId edge_id = mesh.get_edge(candidate->tet_id, candidate->longest_local_edge);
+        const auto [new_vertex_id, first_half_edge, second_half_edge] = mesh.split_edge(edge_id);
         (void)first_half_edge;
         (void)second_half_edge;
-        add_vertex_sample(grid.mesh, field, new_vertex_id, samples_by_vertex_id);
+        add_vertex_sample(mesh, field, new_vertex_id, samples_by_vertex_id);
         ++split_count;
     }
     return split_count;
 }
 
 // Build the compact edge -> incident-tetrahedra table needed for dual surfacing.
-std::vector<GridEdge> build_edge_adjacency(const TetGrid& grid) {
+std::vector<GridEdge> build_edge_adjacency(const mtet::MTetMesh& mesh) {
     std::map<std::pair<std::uint64_t, std::uint64_t>, std::size_t> edge_index_by_vertices;
     std::vector<GridEdge> edges;
 
     std::size_t tet_index = 0;
-    grid.mesh.seq_foreach_tet([&](mtet::TetId, auto tet_ids) {
+    mesh.seq_foreach_tet([&](mtet::TetId, auto tet_ids) {
         for (int first = 0; first < 4; ++first) {
             for (int second = first + 1; second < 4; ++second) {
                 const auto key = std::minmax(
@@ -429,37 +421,36 @@ Vec3 axis_step(int axis, double step) {
 
 } // namespace
 
-SurfaceMesh extract_height_ridges(
+SurfaceMesh extract_height_ridges_from_grid(
     const DifferentialField3D& field,
-    const Bounds3D& bounds,
+    mtet::MTetMesh& coarse_grid,
     const SurfaceOptions& options) {
-    if (!field.gradient || !field.hessian || options.nx < 1 || options.ny < 1 || options.nz < 1 ||
+    if (!field.gradient || !field.hessian || coarse_grid.get_num_vertices() == 0 ||
+        coarse_grid.get_num_tets() == 0 ||
         options.longest_edge_refinement.max_splits < 0 ||
         options.longest_edge_refinement.minimum_edge_length < 0.0) {
-        throw std::invalid_argument("valid field and positive grid resolution required");
+        throw std::invalid_argument("valid field and non-empty MTet grid required");
     }
-
-    TetGrid tet_grid = make_kuhn_grid(bounds, options.nx, options.ny, options.nz);
 
     // 1. Evaluate derivatives and classify each grid vertex.
     std::unordered_map<std::uint64_t, VertexSample> samples_by_vertex_id;
-    samples_by_vertex_id.reserve(tet_grid.mesh.get_num_vertices());
-    tet_grid.mesh.seq_foreach_vertex([&](mtet::VertexId vertex_id, auto position) {
+    samples_by_vertex_id.reserve(coarse_grid.get_num_vertices());
+    coarse_grid.seq_foreach_vertex([&](mtet::VertexId vertex_id, auto position) {
         samples_by_vertex_id.emplace(
             vertex_id.value_of(), evaluate_vertex_sample(field, {position[0], position[1], position[2]}));
     });
 
     // 2. Adapt the coarse MTet grid before locating surface crossings.
     // MTet splits the entire edge one-ring, preserving a conforming tet mesh.
-    refine_longest_edges(tet_grid, field, options.longest_edge_refinement, samples_by_vertex_id);
+    refine_longest_edges_in_place(coarse_grid, field, options.longest_edge_refinement, samples_by_vertex_id);
 
     // 3. Locate eligible ridge and valley crossings on grid edges.
-    const std::size_t tet_count = tet_grid.mesh.get_num_tets();
+    const std::size_t tet_count = coarse_grid.get_num_tets();
     std::vector<Vec3> crossing_sum_by_tet(tet_count);
     std::vector<int> crossing_count_by_tet(tet_count);
     std::vector<CrossingEdge> crossing_edges;
 
-    for (const GridEdge& edge : build_edge_adjacency(tet_grid)) {
+    for (const GridEdge& edge : build_edge_adjacency(coarse_grid)) {
         const VertexSample& first_sample = samples_by_vertex_id.at(edge.first_vertex.value_of());
         const VertexSample& second_sample = samples_by_vertex_id.at(edge.second_vertex.value_of());
         const bool ridge = first_sample.is_convex_dominant && second_sample.is_convex_dominant;
@@ -470,12 +461,12 @@ SurfaceMesh extract_height_ridges(
         const int direction_index = ridge ? 0 : 2;
         Vec3 crossing_point;
         const bool found_crossing = options.subdivide_roots
-            ? find_refined_crossing(field, position_of(tet_grid.mesh, edge.first_vertex),
-                  position_of(tet_grid.mesh, edge.second_vertex), first_sample.gradient,
+            ? find_refined_crossing(field, position_of(coarse_grid, edge.first_vertex),
+                  position_of(coarse_grid, edge.second_vertex), first_sample.gradient,
                   second_sample.gradient, first_sample.eigensystem.vectors[direction_index],
                   second_sample.eigensystem.vectors[direction_index], ridge, options, crossing_point)
-            : find_linear_crossing(position_of(tet_grid.mesh, edge.first_vertex),
-                  position_of(tet_grid.mesh, edge.second_vertex), first_sample.gradient,
+            : find_linear_crossing(position_of(coarse_grid, edge.first_vertex),
+                  position_of(coarse_grid, edge.second_vertex), first_sample.gradient,
                   second_sample.gradient, first_sample.eigensystem.vectors[direction_index],
                   second_sample.eigensystem.vectors[direction_index], crossing_point);
         if (!found_crossing) continue;
@@ -498,11 +489,29 @@ SurfaceMesh extract_height_ridges(
     }
 
     // 5. Make one dual polygon per crossing edge and split it into triangles.
-    append_surface_polygons(crossing_edges, 1, tet_grid.mesh, surface.vertices,
+    append_surface_polygons(crossing_edges, 1, coarse_grid, surface.vertices,
         surface_vertex_by_tet, surface.ridge_triangles);
-    append_surface_polygons(crossing_edges, -1, tet_grid.mesh, surface.vertices,
+    append_surface_polygons(crossing_edges, -1, coarse_grid, surface.vertices,
         surface_vertex_by_tet, surface.valley_triangles);
     return surface;
+}
+
+SurfaceMesh extract_height_ridges(
+    const DifferentialField3D& field,
+    const Bounds3D& bounds,
+    const SurfaceOptions& options) {
+    if (options.nx < 1 || options.ny < 1 || options.nz < 1) {
+        throw std::invalid_argument("positive coarse-grid resolution required");
+    }
+    mtet::MTetMesh coarse_grid = make_kuhn_grid(bounds, options.nx, options.ny, options.nz);
+    return extract_height_ridges_from_grid(field, coarse_grid, options);
+}
+
+SurfaceMesh extract_height_ridges(
+    const DifferentialField3D& field,
+    mtet::MTetMesh& coarse_grid,
+    const SurfaceOptions& options) {
+    return extract_height_ridges_from_grid(field, coarse_grid, options);
 }
 
 SurfaceMesh extract_height_ridges(

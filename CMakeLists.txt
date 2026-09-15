@@ -11,10 +11,11 @@ endif()
 add_library(ridge_surface src/ridge_surface.cpp)
 target_include_directories(ridge_surface PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_compile_features(ridge_surface PUBLIC cxx_std_20)
-target_link_libraries(ridge_surface PRIVATE mtet::mtet Eigen3::Eigen)
+# MTet is public because the API accepts an mtet::MTetMesh supplied by callers.
+target_link_libraries(ridge_surface PUBLIC mtet::mtet PRIVATE Eigen3::Eigen)
 if(MSVC)
   # MTet's fmt dependency requires Unicode source support on MSVC.
-  target_compile_options(mtet PRIVATE /utf-8)
+  target_compile_options(mtet PUBLIC /utf-8)
   target_compile_options(ridge_surface PRIVATE /utf-8)
 endif()
 target_compile_options(ridge_surface PRIVATE
@@ -35,6 +36,9 @@ if(RIDGE_SURFACE_BUILD_PYTHON)
   set_target_properties(ridge_surface_python PROPERTIES
     OUTPUT_NAME ridge_surface
     ARCHIVE_OUTPUT_NAME ridge_surface_python)
+  if(MSVC)
+    target_compile_options(ridge_surface_python PRIVATE /utf-8)
+  endif()
   add_custom_command(TARGET ridge_surface_python POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
       ${CMAKE_CURRENT_SOURCE_DIR}/python/ridge_surface_plot.py

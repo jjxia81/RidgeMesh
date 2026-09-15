@@ -113,6 +113,18 @@ eligible tet with the longest edge is selected next. `MTetMesh::split_edge()`
 splits the full incident-edge ring, so the mesh remains conforming; derivatives
 are evaluated only for the midpoint vertex created by that split.
 
+If you already have an MTet coarse grid, pass it by reference instead. It is
+the same grid that is refined and surfaced—there is no copied vertex or tet
+array:
+
+```cpp
+#include <mtet/grid.h>
+
+mtet::MTetMesh coarse_grid = mtet::generate_tet_grid(
+    {12, 12, 12}, {-1, -1, -1}, {1, 1, 1}, mtet::TET6);
+SurfaceMesh result = extract_height_ridges(f, coarse_grid, opt);
+```
+
 Python exposes the same settings:
 
 ```python
