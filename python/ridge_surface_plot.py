@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable, Literal
+from typing import Callable, Literal, Mapping
 
 import numpy as np
 
@@ -63,7 +63,21 @@ def plot_scalar_slice(
     return figure, ax
 
 
-def plot_mesh(mesh, *, show_ridges: bool = True, show_valleys: bool = True, ax=None):
+def mesh_vertices(mesh) -> np.ndarray:
+    """Return a mesh's vertex positions as an ``(N, 3)`` NumPy array."""
+    return np.asarray([(vertex.x, vertex.y, vertex.z) for vertex in mesh.vertices], dtype=float)
+
+
+def plot_mesh(
+    mesh,
+    *,
+    show_ridges: bool = True,
+    show_valleys: bool = True,
+    ridge_color: str = "tab:red",
+    valley_color: str = "tab:blue",
+    title: str | None = None,
+    ax=None,
+):
     """Plot a ``ridge_surface.SurfaceMesh`` in a Matplotlib 3D axes."""
     import matplotlib.pyplot as plt
     from mpl_toolkits.mplot3d.art3d import Poly3DCollection
@@ -74,7 +88,7 @@ def plot_mesh(mesh, *, show_ridges: bool = True, show_valleys: bool = True, ax=N
     else:
         figure = ax.figure
 
-    vertices = np.asarray([(vertex.x, vertex.y, vertex.z) for vertex in mesh.vertices], dtype=float)
+    vertices = mesh_vertices(mesh)
     if vertices.size == 0:
         return figure, ax
 
@@ -86,9 +100,9 @@ def plot_mesh(mesh, *, show_ridges: bool = True, show_valleys: bool = True, ax=N
         ax.add_collection3d(collection)
 
     if show_ridges:
-        add_triangles(mesh.ridge_triangles, "tab:red", "ridge")
+        add_triangles(mesh.ridge_triangles, ridge_color, "ridge")
     if show_valleys:
-        add_triangles(mesh.valley_triangles, "tab:blue", "valley")
+        add_triangles(mesh.valley_triangles, valley_color, "valley")
 
     minimum = vertices.min(axis=0)
     maximum = vertices.max(axis=0)
@@ -101,4 +115,53 @@ def plot_mesh(mesh, *, show_ridges: bool = True, show_valleys: bool = True, ax=N
     ax.set_xlabel("x")
     ax.set_ylabel("y")
     ax.set_zlabel("z")
+    if title is not None:
+        ax.set_title(title)
+    return figure, ax
+
+
+def plot_mesh_comparison(uniform_mesh, adaptive_mesh, *, title: str = "Sphere ridge comparison"):
+    """Show uniform and adaptive ridge meshes side by side with equal 3-D styling."""
+    import matplotlib.pyplot as plt
+
+    figure = plt.figure(figsize=(10, 5), constrained_layout=True)
+    uniform_axes = figure.add_subplot(1, 2, 1, projection="3d")
+    adaptive_axes = figure.add_subplot(1, 2, 2, projection="3d")
+    plot_mesh(uniform_mesh, show_valleys=False, title="Uniform grid", ax=uniform_axes)
+    plot_mesh(adaptive_mesh, show_valleys=False, title="Adaptive grid", ax=adaptive_axes)
+    figure.suptitle(title)
+    return figure, (uniform_axes, adaptive_axes)
+
+
+def plot_radial_error(
+    meshes: Mapping[str, object],
+    sphere_radius: float,
+    *,
+    bins: int = 80,
+    ax=None,
+):
+    """Plot absolute radius errors for one or more extracted spherical meshes."""
+    import matplotlib.pyplot as plt
+
+    if sphere_radius <= 0.0:
+        raise ValueError("sphere_radius must be positive")
+    if bins < 1:
+        raise ValueError("bins must be positive")
+
+    if ax is None:
+        figure, ax = plt.subplots(constrained_layout=True)
+    else:
+        figure = ax.figure
+
+    for label, mesh in meshes.items():
+        vertices = mesh_vertices(mesh)
+        if len(vertices) == 0:
+            continue
+        errors = np.abs(np.linalg.norm(vertices, axis=1) - sphere_radius)
+        ax.hist(errors, bins=bins, density=True, histtype="step", linewidth=1.6, label=label)
+
+    ax.set_xlabel(r"absolute radial error $|\|x\|-r|$")
+    ax.set_ylabel("density")
+    ax.set_title("Spherical-ridge radial error")
+    ax.legend()
     return figure, ax

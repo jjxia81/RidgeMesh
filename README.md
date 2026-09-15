@@ -42,37 +42,45 @@ python -c "import ridge_surface; print(ridge_surface.__doc__)"
 
 ```python
 import ridge_surface as rs
+import ridge_surface_plot as rsp
 
-box = rs.Bounds3D(rs.Vec3(-1, -1, -1), rs.Vec3(1, 1, 1))
-options = rs.SurfaceOptions()
-options.nx, options.ny, options.nz = 25, 24, 24
+radius = 0.6
+bounds = rs.Bounds3D(rs.Vec3(-1.05, -1, -1), rs.Vec3(.95, 1, 1))
 
-# Scalar callback: finite differences provide gradient and Hessian.
-mesh = rs.extract_height_ridges(
-    lambda x, y, z: -x*x - .1*y*y - .05*z*z,
-    box,
-    options,
-)
-print(len(mesh.vertices), len(mesh.ridge_triangles))
+# Exact derivatives of f(x) = -(||x||^2 - radius^2)^2.
+def gradient(x, y, z):
+    offset = x*x + y*y + z*z - radius*radius
+    return (-4*offset*x, -4*offset*y, -4*offset*z)
+
+def hessian(x, y, z):
+    point = (x, y, z)
+    offset = x*x + y*y + z*z - radius*radius
+    return [[-8*point[i]*point[j] - (4*offset if i == j else 0)
+             for j in range(3)] for i in range(3)]
+
+uniform = rs.SurfaceOptions()
+uniform.nx = uniform.ny = uniform.nz = 64
+uniform.surface_target = rs.RefinementTarget.ridges
+uniform_mesh = rs.extract_height_ridges_from_derivatives(gradient, hessian, bounds, uniform)
+
+adaptive = rs.SurfaceOptions()
+adaptive.nx = adaptive.ny = adaptive.nz = 4
+adaptive.surface_target = rs.RefinementTarget.ridges
+adaptive.longest_edge_refinement.target = rs.RefinementTarget.ridges
+adaptive.longest_edge_refinement.max_splits = 5000
+adaptive.longest_edge_refinement.minimum_edge_length = .005
+adaptive_mesh = rs.extract_height_ridges_from_derivatives(gradient, hessian, bounds, adaptive)
+
+figure, axes = rsp.plot_mesh_comparison(uniform_mesh, adaptive_mesh)
+figure.savefig("sphere_mesh_comparison.png", dpi=180)
+
+figure, axes = rsp.plot_radial_error(
+    {"uniform 64^3": uniform_mesh, "adaptive": adaptive_mesh}, radius)
+figure.savefig("sphere_radial_error.png", dpi=180)
 ```
 
 For accuracy and speed, use `extract_height_ridges_from_derivatives` with
 Python callbacks returning a length-3 gradient and a 3-by-3 Hessian.
-
-To inspect the scalar field itself, install `numpy` and `matplotlib`, then use
-the slice helper copied next to the native module during the build:
-
-```python
-import ridge_surface_plot as rsp
-
-f = lambda x, y, z: -x*x - .1*y*y - .05*z*z
-figure, axes = rsp.plot_scalar_slice(f, bounds, axis="z", position=0.0)
-figure.savefig("function_slice.png", dpi=180)
-
-# Optional: plot the extracted ridge mesh in 3D.
-figure, axes = rsp.plot_mesh(mesh)
-figure.savefig("ridges.png", dpi=180)
-```
 
 The API accepts either a scalar field (central numerical derivatives are used)
 or, preferably, exact gradient and Hessian callbacks:
