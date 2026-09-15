@@ -1,0 +1,27 @@
+# CMake and Visual Studio build trees
+/build/
+/vs2022/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+
+# Compiler and IDE outputs
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.exp
+*.dll
+*.exe
+*.pyd
+*.user
+*.VC.db
+*.VC.opendb
+
+# Generated examples and Python caches
+*.ply
+*.png
+__pycache__/
+*.pyc
