@@ -59,6 +59,15 @@ if(RIDGE_SURFACE_BUILD_PYTHON)
   install(FILES python/ridge_surface_plot.py
     DESTINATION ridgemesh
     RENAME plot.py)
+  # MTet links nanothread dynamically. Bundle it next to the extension and
+  # resolve it relative to the package on Linux instead of relying on a system
+  # library search path.
+  install(TARGETS nanothread
+    LIBRARY DESTINATION ridgemesh
+    RUNTIME DESTINATION ridgemesh)
+  if(UNIX AND NOT APPLE)
+    set_target_properties(ridge_surface_python PROPERTIES INSTALL_RPATH "$ORIGIN")
+  endif()
 endif()
 
 if(WIN32)
@@ -71,8 +80,4 @@ if(WIN32)
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
         $<TARGET_FILE:nanothread> $<TARGET_FILE_DIR:${target}>)
   endforeach()
-endif()
-
-if(WIN32 AND RIDGE_SURFACE_BUILD_PYTHON)
-  install(FILES $<TARGET_FILE:nanothread> DESTINATION ridgemesh)
 endif()
