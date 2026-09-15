@@ -97,6 +97,7 @@ PYBIND11_MODULE(ridge_surface, module) {
         .def_readwrite("ny", &SurfaceOptions::ny)
         .def_readwrite("nz", &SurfaceOptions::nz)
         .def_readwrite("longest_edge_refinement", &SurfaceOptions::longest_edge_refinement)
+        .def_readwrite("surface_target", &SurfaceOptions::surface_target)
         .def_readwrite("subdivide_roots", &SurfaceOptions::subdivide_roots)
         .def_readwrite("root_iterations", &SurfaceOptions::root_iterations)
         .def_readwrite("root_tolerance", &SurfaceOptions::root_tolerance)

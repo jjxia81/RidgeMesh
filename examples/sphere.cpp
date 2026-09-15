@@ -79,20 +79,40 @@ void write_grid_wireframe_ply(mtet::MTetMesh& grid, const char* filename) {
 int main() {
     using namespace ridge_surface;
 
-    // f = -x^2 - .1y^2 - .05z^2: the strong ridge is the plane x = 0.
+    constexpr double sphere_radius = 0.6;
+    // f = -(||x||^2 - r^2)^2 has its maximum, and a strong height ridge,
+    // on the sphere ||x|| = r. It is polynomial, so unlike an unsigned
+    // distance field it is differentiable everywhere.
     DifferentialField3D field{
-        [](const Vec3& point) { return Vec3{-2 * point.x, -.2 * point.y, -.1 * point.z}; },
-        [](const Vec3&) { return Mat3{{{{-2, 0, 0}}, {{0, -.2, 0}}, {{0, 0, -.1}}}}; },
+        [=](const Vec3& point) {
+            const double offset = dot(point, point) - sphere_radius * sphere_radius;
+            return point * (-4.0 * offset);
+        },
+        [=](const Vec3& point) {
+            const double offset = dot(point, point) - sphere_radius * sphere_radius;
+            const std::array<double, 3> coordinates{point.x, point.y, point.z};
+            Mat3 hessian{};
+            for (int row = 0; row < 3; ++row) {
+                for (int column = 0; column < 3; ++column) {
+                    hessian[row][column] = -8.0 * coordinates[row] * coordinates[column];
+                    if (row == column) {
+                        hessian[row][column] -= 4.0 * offset;
+                    }
+                }
+            }
+            return hessian;
+        },
     };
 
     // This is intentionally coarse. The surfacer refines this MTet grid in place.
-    // Offset x by 0.05 so the ridge x=0 lies between, not on, grid planes.
+    // Offset x by 0.05 so no symmetry plane passes exactly through all samples.
     mtet::MTetMesh adaptive_grid = mtet::generate_tet_grid(
         {4, 4, 4}, {-1.05, -1, -1}, {0.95, 1, 1}, mtet::TET6);
     const std::size_t coarse_vertex_count = adaptive_grid.get_num_vertices();
     const std::size_t coarse_tet_count = adaptive_grid.get_num_tets();
 
     SurfaceOptions options;
+    options.surface_target = RefinementTarget::ridges;
     options.longest_edge_refinement.target = RefinementTarget::ridges;
     options.longest_edge_refinement.max_splits = 300;
     options.longest_edge_refinement.minimum_edge_length = 0.025;

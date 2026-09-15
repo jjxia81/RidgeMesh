@@ -57,6 +57,9 @@ struct SurfaceOptions {
   int nx = 32, ny = 32, nz = 32;       // cells along x/y/z
   // The coarse TET6 grid is refined before surfacing when enabled.
   LongestEdgeRefinementOptions longest_edge_refinement;
+  // Choose which extracted surfaces are emitted. The default preserves the
+  // original ridge-and-valley behavior.
+  RefinementTarget surface_target = RefinementTarget::ridges_and_valleys;
   bool subdivide_roots = true;          // bracket-preserving root refinement
   int root_iterations = 4;
   double root_tolerance = 1e-7;

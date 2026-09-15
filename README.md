@@ -101,6 +101,7 @@ opt.nx = opt.ny = opt.nz = 12; // coarse starting grid
 opt.longest_edge_refinement.target = RefinementTarget::ridges_and_valleys;
 opt.longest_edge_refinement.max_splits = 500;
 opt.longest_edge_refinement.minimum_edge_length = 0.01; // optional stop limit
+opt.surface_target = RefinementTarget::ridges; // omit unrelated valley sheets
 
 SurfaceMesh result = extract_height_ridges(f, bounds, opt);
 ```

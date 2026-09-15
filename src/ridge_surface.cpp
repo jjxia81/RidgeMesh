@@ -453,8 +453,14 @@ SurfaceMesh extract_height_ridges_from_grid(
     for (const GridEdge& edge : build_edge_adjacency(coarse_grid)) {
         const VertexSample& first_sample = samples_by_vertex_id.at(edge.first_vertex.value_of());
         const VertexSample& second_sample = samples_by_vertex_id.at(edge.second_vertex.value_of());
-        const bool ridge = first_sample.is_convex_dominant && second_sample.is_convex_dominant;
-        const bool valley = !first_sample.is_convex_dominant && !second_sample.is_convex_dominant;
+        const bool extract_ridges = options.surface_target == RefinementTarget::ridges ||
+            options.surface_target == RefinementTarget::ridges_and_valleys;
+        const bool extract_valleys = options.surface_target == RefinementTarget::valleys ||
+            options.surface_target == RefinementTarget::ridges_and_valleys;
+        const bool ridge = extract_ridges &&
+            first_sample.is_convex_dominant && second_sample.is_convex_dominant;
+        const bool valley = extract_valleys &&
+            !first_sample.is_convex_dominant && !second_sample.is_convex_dominant;
         if (!ridge && !valley) continue;
 
         const int label = ridge ? 1 : -1;
