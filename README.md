@@ -163,5 +163,7 @@ exactly on a grid-vertex plane. For example, use an odd resolution along the
 normal direction or shift the bounds slightly. Zero-valued whole edges are
 deliberately ignored because they have no unique dual-cell topology.
 
-The `ridge_example` program writes the resulting mesh as ASCII PLY to
-`ridge_example.ply` in its working directory.
+The `ridge_example` program deliberately starts from a coarse MTet grid,
+enables 300 ridge-driven longest-edge splits, and writes two ASCII PLY files
+in its working directory: `ridge_example.ply` is the extracted ridge surface;
+`adaptive_grid_wireframe.ply` contains the final MTet vertex/edge wireframe.
