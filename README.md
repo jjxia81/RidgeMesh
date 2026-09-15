@@ -117,6 +117,8 @@ mesh = rm.extract_torch_udf(
     rm.Bounds3D(rm.Vec3(-1, -1, -1), rm.Vec3(1, 1, 1)),
     options,
     device="cuda",
+    derivative_mode="finite_difference",
+    finite_difference_step=5e-3,
 )
 
 from ridgemesh import plot
@@ -124,10 +126,13 @@ figure, axes = plot.plot_mesh(mesh, show_valleys=False, title="GeoUDF ridge")
 figure.savefig("geoudf_ridge.png", dpi=180)
 ```
 
-The current native callback interface evaluates autograd derivatives per query
-point, with caching when the gradient and Hessian are requested at the same
-location. Start from a modest coarse grid for GeoUDF. A batched precomputed
-sample API is the next performance step for high-resolution neural UDFs.
+The default adapter mode uses autograd. Set
+`derivative_mode="finite_difference"` to estimate both the gradient and
+Hessian from central differences of the scalar UDF, which is useful when a
+model's second-order autograd Hessian is unreliable. It needs 19 scalar UDF
+evaluations per uncached point, so start from a modest coarse grid for GeoUDF.
+A batched precomputed-sample API is the next performance step for
+high-resolution neural UDFs.
 
 The API accepts either a scalar field (central numerical derivatives are used)
 or, preferably, exact gradient and Hessian callbacks:

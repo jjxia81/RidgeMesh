@@ -36,10 +36,12 @@ class TorchFieldAdapter:
     convention is a query tensor with shape ``(B, 3, M)``; this adapter uses
     ``(1, 3, 1)`` for each requested point.
 
-    Derivatives are cached by point because the C++ surfacer asks for a Hessian
-    and gradient at the same locations. For large grids, prefer analytic C++
-    callbacks or a future batched-sample API: autograd calls here remain
-    pointwise at the native callback boundary.
+    Set ``derivative_mode="finite_difference"`` to estimate both derivatives
+    from central scalar-UDF differences. Derivatives are cached by point
+    because the C++ surfacer asks for a Hessian and gradient at the same
+    locations. For large grids, prefer analytic C++ callbacks or a future
+    batched-sample API: both modes remain pointwise at the native callback
+    boundary.
     """
 
     def __init__(
@@ -50,6 +52,8 @@ class TorchFieldAdapter:
         device: Optional[str] = None,
         dtype=None,
         move_context: bool = True,
+        derivative_mode: str = "autograd",
+        finite_difference_step: float = 5e-3,
     ):
         import torch
 
@@ -57,6 +61,12 @@ class TorchFieldAdapter:
         self.device = torch.device(device) if device is not None else self._model_device(model)
         self.dtype = dtype if dtype is not None else torch.float32
         self.context = _move_tensors(context or {}, self.device) if move_context else (context or {})
+        if derivative_mode not in ("autograd", "finite_difference"):
+            raise ValueError("derivative_mode must be 'autograd' or 'finite_difference'")
+        if finite_difference_step <= 0.0:
+            raise ValueError("finite_difference_step must be positive")
+        self.derivative_mode = derivative_mode
+        self.finite_difference_step = float(finite_difference_step)
         self._cache: Dict[
             Tuple[float, float, float],
             Tuple[Tuple[float, float, float], List[List[float]]],
@@ -85,14 +95,22 @@ class TorchFieldAdapter:
         return output
 
     def _evaluate_derivatives(self, x: float, y: float, z: float):
-        import torch
-
         key = (float(x), float(y), float(z))
         cached = self._cache.get(key)
         if cached is not None:
             return cached
 
-        point = torch.tensor(key, device=self.device, dtype=self.dtype, requires_grad=True)
+        if self.derivative_mode == "finite_difference":
+            result = self._evaluate_finite_difference_derivatives(key)
+        else:
+            result = self._evaluate_autograd_derivatives(key)
+        self._cache[key] = result
+        return result
+
+    def _evaluate_autograd_derivatives(self, point_coordinates):
+        import torch
+
+        point = torch.tensor(point_coordinates, device=self.device, dtype=self.dtype, requires_grad=True)
         query = point.reshape(1, 3, 1)
         with torch.enable_grad():
             udf = self._udf_from_output(self.model(self.context, query))
@@ -110,9 +128,58 @@ class TorchFieldAdapter:
             [float(value) for value in row.detach().cpu()]
             for row in hessian_rows
         ]
-        result = (gradient_value, hessian_value)
-        self._cache[key] = result
-        return result
+        return gradient_value, hessian_value
+
+    def _scalar_value(self, point_coordinates):
+        """Evaluate one scalar UDF value without retaining an autograd graph."""
+        import torch
+
+        point = torch.tensor(point_coordinates, device=self.device, dtype=self.dtype)
+        query = point.reshape(1, 3, 1)
+        with torch.no_grad():
+            udf = self._udf_from_output(self.model(self.context, query))
+        if udf.numel() != 1:
+            raise ValueError("the model must return one scalar UDF value for a (1, 3, 1) query")
+        return float(udf.reshape(()).detach().cpu())
+
+    def _evaluate_finite_difference_derivatives(self, point_coordinates):
+        """Estimate gradient/Hessian from central scalar-UDF differences.
+
+        The diagonal terms use second differences and off-diagonal terms use
+        the symmetric four-corner stencil. This requires 19 scalar UDF calls
+        per uncached point, so it is intended for correctness checks and
+        modest adaptive grids rather than a dense neural-UDF sweep.
+        """
+        h = self.finite_difference_step
+        center_value = self._scalar_value(point_coordinates)
+        gradient = [0.0, 0.0, 0.0]
+        hessian = [[0.0, 0.0, 0.0] for _ in range(3)]
+
+        def shifted(first_axis, first_offset, second_axis=None, second_offset=0.0):
+            point = list(point_coordinates)
+            point[first_axis] += first_offset
+            if second_axis is not None:
+                point[second_axis] += second_offset
+            return self._scalar_value(point)
+
+        for axis in range(3):
+            positive = shifted(axis, h)
+            negative = shifted(axis, -h)
+            gradient[axis] = (positive - negative) / (2.0 * h)
+            hessian[axis][axis] = (positive - 2.0 * center_value + negative) / (h * h)
+
+        for row in range(3):
+            for column in range(row + 1, 3):
+                mixed = (
+                    shifted(row, h, column, h)
+                    - shifted(row, h, column, -h)
+                    - shifted(row, -h, column, h)
+                    + shifted(row, -h, column, -h)
+                ) / (4.0 * h * h)
+                hessian[row][column] = mixed
+                hessian[column][row] = mixed
+
+        return tuple(gradient), hessian
 
     def gradient(self, x: float, y: float, z: float):
         """Return the autograd gradient in the format expected by pybind11."""
@@ -131,13 +198,24 @@ def extract_torch_udf(
     *,
     device: Optional[str] = None,
     dtype=None,
+    derivative_mode: str = "autograd",
+    finite_difference_step: float = 5e-3,
 ):
     """Extract a ridge/valley mesh from a PyTorch UDF such as GeoUDF.
 
     The model is called as ``model(context, query)`` with a GeoUDF-compatible
-    query tensor of shape ``(1, 3, 1)``. Returns the native ``SurfaceMesh``.
+    query tensor of shape ``(1, 3, 1)``. Set ``derivative_mode`` to
+    ``"finite_difference"`` to avoid second-order autograd. Returns the native
+    ``SurfaceMesh``.
     """
-    adapter = TorchFieldAdapter(model, context, device=device, dtype=dtype)
+    adapter = TorchFieldAdapter(
+        model,
+        context,
+        device=device,
+        dtype=dtype,
+        derivative_mode=derivative_mode,
+        finite_difference_step=finite_difference_step,
+    )
     return extract_height_ridges_from_derivatives(
         adapter.gradient,
         adapter.hessian,
