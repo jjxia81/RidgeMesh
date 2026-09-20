@@ -442,8 +442,7 @@ SurfaceMesh extract_height_ridges_from_grid(
     if (!field.gradient || !field.hessian || coarse_grid.get_num_vertices() == 0 ||
         coarse_grid.get_num_tets() == 0 ||
         options.longest_edge_refinement.max_splits < 0 ||
-        options.longest_edge_refinement.minimum_edge_length < 0.0 ||
-        options.minimum_curvature_sum < 0.0) {
+        options.longest_edge_refinement.minimum_edge_length < 0.0) {
         throw std::invalid_argument("valid field and non-empty MTet grid required");
     }
     if (std::isfinite(options.minimum_ridge_field_value) && !field.value) {
