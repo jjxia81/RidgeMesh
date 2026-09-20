@@ -40,7 +40,7 @@ struct CrossingEdge {
 struct VertexSample {
     Vec3 gradient;
     OrderedEigenSystem eigensystem;
-    bool is_convex_dominant;
+    double curvature_sum;
 };
 
 struct RefinementCandidate {
@@ -102,7 +102,7 @@ VertexSample evaluate_vertex_sample(const DifferentialField3D& field, Vec3 point
     return {
         field.gradient(point),
         eigensystem,
-        eigensystem.values[0] + eigensystem.values[2] > 0.0,
+        eigensystem.values[0] + eigensystem.values[2],
     };
 }
 
@@ -150,7 +150,8 @@ bool has_condition_crossing(
 bool should_refine_tet(
     std::span<const mtet::VertexId, 4> tet_vertices,
     const std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id,
-    RefinementTarget target) {
+    RefinementTarget target,
+    double minimum_curvature_sum) {
     if (target == RefinementTarget::none) {
         return false;
     }
@@ -162,9 +163,19 @@ bool should_refine_tet(
         curvature_sums[index] = eigen.values[0] + eigen.values[2];
     }
     const int convexity = sign_consistency(curvature_sums);
-    const bool ridge_crossing = convexity >= 0 &&
+    const bool ridge_is_strong = minimum_curvature_sum > 0.0
+        ? std::all_of(curvature_sums.begin(), curvature_sums.end(), [minimum_curvature_sum](double value) {
+              return value > minimum_curvature_sum;
+          })
+        : convexity >= 0;
+    const bool valley_is_strong = minimum_curvature_sum > 0.0
+        ? std::all_of(curvature_sums.begin(), curvature_sums.end(), [minimum_curvature_sum](double value) {
+              return value < -minimum_curvature_sum;
+          })
+        : convexity <= 0;
+    const bool ridge_crossing = ridge_is_strong &&
         has_condition_crossing(tet_vertices, samples_by_vertex_id, 0);
-    const bool valley_crossing = convexity <= 0 &&
+    const bool valley_crossing = valley_is_strong &&
         has_condition_crossing(tet_vertices, samples_by_vertex_id, 2);
 
     switch (target) {
@@ -183,14 +194,15 @@ bool should_refine_tet(
 std::optional<RefinementCandidate> find_longest_refinement_candidate(
     const mtet::MTetMesh& mesh,
     const std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id,
-    RefinementTarget target) {
+    RefinementTarget target,
+    double minimum_curvature_sum) {
     constexpr std::array<std::array<int, 2>, 6> kLocalEdges{{
         {{0, 1}}, {{1, 2}}, {{2, 0}}, {{0, 3}}, {{1, 3}}, {{2, 3}},
     }};
     std::optional<RefinementCandidate> best_candidate;
 
     mesh.seq_foreach_tet([&](mtet::TetId tet_id, auto tet_vertices) {
-        if (!should_refine_tet(tet_vertices, samples_by_vertex_id, target)) {
+        if (!should_refine_tet(tet_vertices, samples_by_vertex_id, target, minimum_curvature_sum)) {
             return;
         }
 
@@ -217,7 +229,8 @@ int refine_longest_edges_in_place(
     mtet::MTetMesh& mesh,
     const DifferentialField3D& field,
     const LongestEdgeRefinementOptions& options,
-    std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id) {
+    std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id,
+    double minimum_curvature_sum) {
     if (options.target == RefinementTarget::none || options.max_splits == 0) {
         return 0;
     }
@@ -225,7 +238,8 @@ int refine_longest_edges_in_place(
     int split_count = 0;
     while (split_count < options.max_splits) {
         const auto candidate =
-            find_longest_refinement_candidate(mesh, samples_by_vertex_id, options.target);
+            find_longest_refinement_candidate(
+                mesh, samples_by_vertex_id, options.target, minimum_curvature_sum);
         if (!candidate || candidate->longest_edge_length <= options.minimum_edge_length) {
             break;
         }
@@ -428,7 +442,8 @@ SurfaceMesh extract_height_ridges_from_grid(
     if (!field.gradient || !field.hessian || coarse_grid.get_num_vertices() == 0 ||
         coarse_grid.get_num_tets() == 0 ||
         options.longest_edge_refinement.max_splits < 0 ||
-        options.longest_edge_refinement.minimum_edge_length < 0.0) {
+        options.longest_edge_refinement.minimum_edge_length < 0.0 ||
+        options.minimum_curvature_sum < 0.0) {
         throw std::invalid_argument("valid field and non-empty MTet grid required");
     }
 
@@ -442,7 +457,9 @@ SurfaceMesh extract_height_ridges_from_grid(
 
     // 2. Adapt the coarse MTet grid before locating surface crossings.
     // MTet splits the entire edge one-ring, preserving a conforming tet mesh.
-    refine_longest_edges_in_place(coarse_grid, field, options.longest_edge_refinement, samples_by_vertex_id);
+    refine_longest_edges_in_place(
+        coarse_grid, field, options.longest_edge_refinement, samples_by_vertex_id,
+        options.minimum_curvature_sum);
 
     // 3. Locate eligible ridge and valley crossings on grid edges.
     const std::size_t tet_count = coarse_grid.get_num_tets();
@@ -458,9 +475,11 @@ SurfaceMesh extract_height_ridges_from_grid(
         const bool extract_valleys = options.surface_target == RefinementTarget::valleys ||
             options.surface_target == RefinementTarget::ridges_and_valleys;
         const bool ridge = extract_ridges &&
-            first_sample.is_convex_dominant && second_sample.is_convex_dominant;
+            first_sample.curvature_sum > options.minimum_curvature_sum &&
+            second_sample.curvature_sum > options.minimum_curvature_sum;
         const bool valley = extract_valleys &&
-            !first_sample.is_convex_dominant && !second_sample.is_convex_dominant;
+            first_sample.curvature_sum < -options.minimum_curvature_sum &&
+            second_sample.curvature_sum < -options.minimum_curvature_sum;
         if (!ridge && !valley) continue;
 
         const int label = ridge ? 1 : -1;

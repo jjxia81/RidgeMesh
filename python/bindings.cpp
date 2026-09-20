@@ -101,6 +101,7 @@ PYBIND11_MODULE(ridge_surface, module) {
         .def_readwrite("subdivide_roots", &SurfaceOptions::subdivide_roots)
         .def_readwrite("root_iterations", &SurfaceOptions::root_iterations)
         .def_readwrite("root_tolerance", &SurfaceOptions::root_tolerance)
+        .def_readwrite("minimum_curvature_sum", &SurfaceOptions::minimum_curvature_sum)
         .def_readwrite("finite_difference_step", &SurfaceOptions::finite_difference_step);
 
     py::class_<Triangle>(module, "Triangle")

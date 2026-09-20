@@ -63,6 +63,10 @@ struct SurfaceOptions {
   bool subdivide_roots = true;          // bracket-preserving root refinement
   int root_iterations = 4;
   double root_tolerance = 1e-7;
+  // For a ridge, k1 + k3 is computed from the eigenvalues of -H. Require it
+  // to exceed this value at both endpoints of every emitted crossing edge.
+  // A zero threshold preserves the notebook's original sign-only test.
+  double minimum_curvature_sum = 0.0;
   double finite_difference_step = 1e-4; // only used by the scalar-field overload
 };
 struct Triangle { std::array<std::size_t,3> indices; };
