@@ -75,6 +75,7 @@ class TorchFieldAdapter:
             Tuple[float, float, float],
             Tuple[Tuple[float, float, float], List[List[float]]],
         ] = {}
+        self._uniform_grid_samples = None
 
         if hasattr(model, "eval"):
             model.eval()
@@ -104,12 +105,110 @@ class TorchFieldAdapter:
         if cached is not None:
             return cached
 
+        uniform_sample = self._uniform_grid_sample(key)
+        if uniform_sample is not None:
+            return uniform_sample
+
         if self.derivative_mode == "finite_difference":
             result = self._evaluate_finite_difference_derivatives(key)
         else:
             result = self._evaluate_autograd_derivatives(key)
         self._cache[key] = result
         return result
+
+    def precompute_uniform_grid(self, bounds, nx: int, ny: int, nz: int, batch_size: int) -> None:
+        """Batch autograd derivatives at all vertices of a uniform MTet grid.
+
+        This removes the expensive C++ -> Python -> CUDA round trip for every
+        initial-grid vertex. It assumes the model evaluates each query point
+        independently, as GeoUDF does in evaluation mode. Points introduced by
+        optional adaptive splitting are evaluated by the existing pointwise
+        fallback path.
+        """
+        import numpy as np
+        import torch
+
+        if self.derivative_mode != "autograd":
+            return
+        if min(nx, ny, nz) < 1:
+            raise ValueError("uniform derivative precomputation requires nx, ny, nz >= 1")
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+
+        lower = np.array((bounds.min.x, bounds.min.y, bounds.min.z), dtype=np.float64)
+        upper = np.array((bounds.max.x, bounds.max.y, bounds.max.z), dtype=np.float64)
+        # MTet's resolution is a cell count, so it creates resolution + 1
+        # vertices along every axis.
+        shape = (int(nx) + 1, int(ny) + 1, int(nz) + 1)
+        axes = [
+            torch.linspace(float(lower[axis]), float(upper[axis]), shape[axis],
+                           device=self.device, dtype=self.dtype)
+            for axis in range(3)
+        ]
+        mesh = torch.meshgrid(*axes, indexing="ij")
+        points = torch.stack(mesh, dim=-1).reshape(-1, 3)
+        gradients = np.empty((points.shape[0], 3), dtype=np.float32)
+        hessians = np.empty((points.shape[0], 3, 3), dtype=np.float32)
+        print(
+            "RidgeMesh: batching autograd derivatives for {} uniform-grid vertices "
+            "({} queries per CUDA batch).".format(points.shape[0], batch_size),
+            flush=True,
+        )
+
+        for first in range(0, points.shape[0], batch_size):
+            last = min(first + batch_size, points.shape[0])
+            batch = points[first:last].detach().clone().requires_grad_(True)
+            query = batch.transpose(0, 1).unsqueeze(0)
+            with torch.enable_grad():
+                values = self._udf_from_output(self.model(self.context, query)).reshape(-1)
+                if values.numel() != batch.shape[0]:
+                    raise ValueError(
+                        "the model must return one scalar UDF value for every batched query"
+                    )
+                gradient = torch.autograd.grad(
+                    values, batch, grad_outputs=torch.ones_like(values), create_graph=True
+                )[0]
+                rows = [
+                    torch.autograd.grad(gradient[:, axis].sum(), batch, retain_graph=axis < 2)[0]
+                    for axis in range(3)
+                ]
+                hessian = torch.stack(rows, dim=1)
+
+            gradients[first:last] = gradient.detach().cpu().numpy()
+            hessians[first:last] = hessian.detach().cpu().numpy()
+
+        self._uniform_grid_samples = {
+            "lower": lower,
+            "upper": upper,
+            "shape": shape,
+            "step": (upper - lower) / (np.asarray(shape, dtype=np.float64) - 1.0),
+            "gradient": gradients,
+            "hessian": hessians,
+        }
+
+    def _uniform_grid_sample(self, point_coordinates):
+        """Return a cached uniform-grid sample, or None for an adaptive point."""
+        if self._uniform_grid_samples is None:
+            return None
+
+        import numpy as np
+
+        cache = self._uniform_grid_samples
+        point = np.asarray(point_coordinates, dtype=np.float64)
+        coordinate = (point - cache["lower"]) / cache["step"]
+        index = np.rint(coordinate).astype(np.int64)
+        tolerance = 2e-5
+        if (
+            np.any(index < 0)
+            or np.any(index >= np.asarray(cache["shape"]))
+            or np.any(np.abs(coordinate - index) > tolerance)
+        ):
+            return None
+
+        flat_index = np.ravel_multi_index(tuple(index), cache["shape"])
+        gradient = tuple(float(value) for value in cache["gradient"][flat_index])
+        hessian = [[float(value) for value in row] for row in cache["hessian"][flat_index]]
+        return gradient, hessian
 
     def _evaluate_autograd_derivatives(self, point_coordinates):
         import torch
@@ -220,6 +319,7 @@ def extract_torch_udf(
     derivative_mode: str = "autograd",
     hessian_backend: str = "functional",
     finite_difference_step: float = 5e-3,
+    uniform_grid_batch_size: int = 0,
 ):
     """Extract a ridge/valley mesh from a PyTorch UDF such as GeoUDF.
 
@@ -227,7 +327,9 @@ def extract_torch_udf(
     query tensor of shape ``(1, 3, 1)``. Set ``derivative_mode`` to
     ``"finite_difference"`` to avoid second-order autograd. With autograd,
     ``hessian_backend="functional"`` uses ``torch.autograd.functional.hessian``;
-    ``"grad"`` uses repeated ``torch.autograd.grad`` calls. Returns the native
+    ``"grad"`` uses repeated ``torch.autograd.grad`` calls. Set
+    ``uniform_grid_batch_size`` to batch all initial uniform-grid derivatives
+    on the selected Torch device before native extraction. Returns the native
     ``SurfaceMesh``.
     """
     adapter = TorchFieldAdapter(
@@ -239,9 +341,15 @@ def extract_torch_udf(
         hessian_backend=hessian_backend,
         finite_difference_step=finite_difference_step,
     )
+    selected_options = options if options is not None else SurfaceOptions()
+    if uniform_grid_batch_size > 0:
+        adapter.precompute_uniform_grid(
+            bounds, selected_options.nx, selected_options.ny, selected_options.nz,
+            uniform_grid_batch_size,
+        )
     return extract_height_ridges_from_derivatives(
         adapter.gradient,
         adapter.hessian,
         bounds,
-        options if options is not None else SurfaceOptions(),
+        selected_options,
     )
