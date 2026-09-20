@@ -53,6 +53,7 @@ class TorchFieldAdapter:
         dtype=None,
         move_context: bool = True,
         derivative_mode: str = "autograd",
+        hessian_backend: str = "functional",
         finite_difference_step: float = 5e-3,
     ):
         import torch
@@ -63,9 +64,12 @@ class TorchFieldAdapter:
         self.context = _move_tensors(context or {}, self.device) if move_context else (context or {})
         if derivative_mode not in ("autograd", "finite_difference"):
             raise ValueError("derivative_mode must be 'autograd' or 'finite_difference'")
+        if hessian_backend not in ("grad", "functional"):
+            raise ValueError("hessian_backend must be 'grad' or 'functional'")
         if finite_difference_step <= 0.0:
             raise ValueError("finite_difference_step must be positive")
         self.derivative_mode = derivative_mode
+        self.hessian_backend = hessian_backend
         self.finite_difference_step = float(finite_difference_step)
         self._cache: Dict[
             Tuple[float, float, float],
@@ -118,10 +122,25 @@ class TorchFieldAdapter:
                 raise ValueError("the model must return one scalar UDF value for a (1, 3, 1) query")
             scalar_udf = udf.reshape(())
             gradient = torch.autograd.grad(scalar_udf, point, create_graph=True)[0]
-            hessian_rows = [
-                torch.autograd.grad(gradient[index], point, retain_graph=index < 2)[0]
-                for index in range(3)
-            ]
+            if self.hessian_backend == "functional":
+                def scalar_from_point(input_point):
+                    input_query = input_point.reshape(1, 3, 1)
+                    value = self._udf_from_output(self.model(self.context, input_query))
+                    if value.numel() != 1:
+                        raise ValueError(
+                            "the model must return one scalar UDF value for a (1, 3, 1) query"
+                        )
+                    return value.reshape(())
+
+                hessian = torch.autograd.functional.hessian(
+                    scalar_from_point, point, create_graph=False, vectorize=False
+                )
+                hessian_rows = [hessian[index] for index in range(3)]
+            else:
+                hessian_rows = [
+                    torch.autograd.grad(gradient[index], point, retain_graph=index < 2)[0]
+                    for index in range(3)
+                ]
 
         gradient_value = tuple(float(value) for value in gradient.detach().cpu())
         hessian_value = [
@@ -199,13 +218,16 @@ def extract_torch_udf(
     device: Optional[str] = None,
     dtype=None,
     derivative_mode: str = "autograd",
+    hessian_backend: str = "functional",
     finite_difference_step: float = 5e-3,
 ):
     """Extract a ridge/valley mesh from a PyTorch UDF such as GeoUDF.
 
     The model is called as ``model(context, query)`` with a GeoUDF-compatible
     query tensor of shape ``(1, 3, 1)``. Set ``derivative_mode`` to
-    ``"finite_difference"`` to avoid second-order autograd. Returns the native
+    ``"finite_difference"`` to avoid second-order autograd. With autograd,
+    ``hessian_backend="functional"`` uses ``torch.autograd.functional.hessian``;
+    ``"grad"`` uses repeated ``torch.autograd.grad`` calls. Returns the native
     ``SurfaceMesh``.
     """
     adapter = TorchFieldAdapter(
@@ -214,6 +236,7 @@ def extract_torch_udf(
         device=device,
         dtype=dtype,
         derivative_mode=derivative_mode,
+        hessian_backend=hessian_backend,
         finite_difference_step=finite_difference_step,
     )
     return extract_height_ridges_from_derivatives(
