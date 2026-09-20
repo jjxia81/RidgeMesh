@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <utility>
@@ -33,6 +34,7 @@ using ScalarField3D = std::function<double(const Vec3&)>;
 struct DifferentialField3D {
   std::function<Vec3(const Vec3&)> gradient;
   std::function<Mat3(const Vec3&)> hessian;
+  std::function<double(const Vec3&)> value;
 };
 
 struct Bounds3D { Vec3 min, max; };
@@ -67,6 +69,10 @@ struct SurfaceOptions {
   // to exceed this value at both endpoints of every emitted crossing edge.
   // A zero threshold preserves the notebook's original sign-only test.
   double minimum_curvature_sum = 0.0;
+  // If finite, a ridge crossing must have f(x) >= this value. This removes
+  // local but low-valued ridges when extracting a particular level surface.
+  // The default disables the gate.
+  double minimum_ridge_field_value = -std::numeric_limits<double>::infinity();
   double finite_difference_step = 1e-4; // only used by the scalar-field overload
 };
 struct Triangle { std::array<std::size_t,3> indices; };

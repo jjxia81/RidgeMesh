@@ -307,6 +307,10 @@ class TorchFieldAdapter:
         """Return the autograd Hessian in the format expected by pybind11."""
         return self._evaluate_derivatives(x, y, z)[1]
 
+    def value(self, x: float, y: float, z: float):
+        """Return the scalar field value for an optional crossing-value gate."""
+        return self._scalar_value((x, y, z))
+
 
 def extract_torch_udf(
     model: Callable,
@@ -352,4 +356,5 @@ def extract_torch_udf(
         adapter.hessian,
         bounds,
         selected_options,
+        adapter.value,
     )

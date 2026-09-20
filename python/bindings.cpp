@@ -50,8 +50,16 @@ SurfaceMesh extract_from_derivatives(
     const py::function& gradient,
     const py::function& hessian,
     const Bounds3D& bounds,
-    const SurfaceOptions& options) {
+    const SurfaceOptions& options,
+    const py::object& value) {
     DifferentialField3D field;
+    if (!value.is_none()) {
+        const py::function scalar_value = value.cast<py::function>();
+        field.value = [scalar_value](const Vec3& point) {
+            py::gil_scoped_acquire acquire;
+            return scalar_value(point.x, point.y, point.z).cast<double>();
+        };
+    }
     field.gradient = [gradient](const Vec3& point) {
         py::gil_scoped_acquire acquire;
         return as_vec3(gradient(point.x, point.y, point.z));
@@ -102,6 +110,7 @@ PYBIND11_MODULE(ridge_surface, module) {
         .def_readwrite("root_iterations", &SurfaceOptions::root_iterations)
         .def_readwrite("root_tolerance", &SurfaceOptions::root_tolerance)
         .def_readwrite("minimum_curvature_sum", &SurfaceOptions::minimum_curvature_sum)
+        .def_readwrite("minimum_ridge_field_value", &SurfaceOptions::minimum_ridge_field_value)
         .def_readwrite("finite_difference_step", &SurfaceOptions::finite_difference_step);
 
     py::class_<Triangle>(module, "Triangle")
@@ -126,5 +135,6 @@ PYBIND11_MODULE(ridge_surface, module) {
         py::arg("hessian"),
         py::arg("bounds"),
         py::arg("options") = SurfaceOptions{},
+        py::arg("value") = py::none(),
         "Extract ridges/valleys using analytic gradient(x,y,z) and hessian(x,y,z) callbacks.");
 }

@@ -446,6 +446,9 @@ SurfaceMesh extract_height_ridges_from_grid(
         options.minimum_curvature_sum < 0.0) {
         throw std::invalid_argument("valid field and non-empty MTet grid required");
     }
+    if (std::isfinite(options.minimum_ridge_field_value) && !field.value) {
+        throw std::invalid_argument("a scalar field callback is required for minimum_ridge_field_value");
+    }
 
     // 1. Evaluate derivatives and classify each grid vertex.
     std::unordered_map<std::uint64_t, VertexSample> samples_by_vertex_id;
@@ -495,6 +498,10 @@ SurfaceMesh extract_height_ridges_from_grid(
                   second_sample.gradient, first_sample.eigensystem.vectors[direction_index],
                   second_sample.eigensystem.vectors[direction_index], crossing_point);
         if (!found_crossing) continue;
+        if (ridge && std::isfinite(options.minimum_ridge_field_value) &&
+            field.value(crossing_point) < options.minimum_ridge_field_value) {
+            continue;
+        }
 
         crossing_edges.push_back({edge.first_vertex, edge.second_vertex, edge.incident_tets, label});
         for (const std::size_t tet_index : edge.incident_tets) {
@@ -551,6 +558,7 @@ SurfaceMesh extract_height_ridges(
     const auto evaluate = [&](Vec3 point) { return scalar_field(point); };
 
     DifferentialField3D field;
+    field.value = evaluate;
     field.gradient = [=](Vec3 point) {
         const double dx = (evaluate(point + axis_step(0, step)) - evaluate(point - axis_step(0, step))) / (2.0 * step);
         const double dy = (evaluate(point + axis_step(1, step)) - evaluate(point - axis_step(1, step))) / (2.0 * step);
