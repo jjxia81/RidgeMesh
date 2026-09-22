@@ -240,3 +240,8 @@ working directory: `uniform_64_sphere.ply` is the dense uniform-grid ridge;
 `ridge_example.ply` is the adaptive-grid ridge; and
 `adaptive_grid_wireframe.ply` contains the final adaptive MTet vertex/edge
 wireframe.
+
+`ellipsoid_example` is a separate analytic example for
+\(F(x) = -(x^2/a^2 + y^2/b^2 + z^2/c^2 - 1)^2\). It writes
+`ellipsoid_ridge.ply`, a uniform-grid ridge mesh for an ellipsoid with
+semi-axes \(a=0.75\), \(b=0.52\), and \(c=0.38\).
