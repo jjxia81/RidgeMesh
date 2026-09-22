@@ -131,8 +131,11 @@ The default adapter mode uses autograd. Set
 Hessian from central differences of the scalar UDF, which is useful when a
 model's second-order autograd Hessian is unreliable. It needs 19 scalar UDF
 evaluations per uncached point, so start from a modest coarse grid for GeoUDF.
-A batched precomputed-sample API is the next performance step for
-high-resolution neural UDFs.
+For a numerical Hessian paired with an autograd gradient, set
+`hessian_backend="gradient_difference"` with `derivative_mode="autograd"`.
+It samples autograd gradients at the six axis neighbours, uses centered
+differences to form the Hessian, and symmetrizes it. Both numerical modes batch
+all uniform-grid samples when `uniform_grid_batch_size` is positive.
 
 To test that finite-difference path independently of a trained model, run the
 known-sphere smoke test. It uses a smooth scalar field with its ridge exactly
