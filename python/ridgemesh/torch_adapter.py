@@ -39,9 +39,9 @@ class TorchFieldAdapter:
     Set ``derivative_mode="finite_difference"`` to estimate both derivatives
     from central scalar-UDF differences. Derivatives are cached by point
     because the C++ surfacer asks for a Hessian and gradient at the same
-    locations. For large grids, prefer analytic C++ callbacks or a future
-    batched-sample API: both modes remain pointwise at the native callback
-    boundary.
+    locations. Set ``uniform_grid_batch_size`` in ``extract_torch_udf`` to
+    precompute either derivative mode in CUDA batches on a uniform base grid.
+    Adaptive midpoint samples remain pointwise.
     """
 
     def __init__(
@@ -117,7 +117,7 @@ class TorchFieldAdapter:
         return result
 
     def precompute_uniform_grid(self, bounds, nx: int, ny: int, nz: int, batch_size: int) -> None:
-        """Batch autograd derivatives at all vertices of a uniform MTet grid.
+        """Batch derivatives at all vertices of a uniform MTet grid.
 
         This removes the expensive C++ -> Python -> CUDA round trip for every
         initial-grid vertex. It assumes the model evaluates each query point
@@ -128,8 +128,6 @@ class TorchFieldAdapter:
         import numpy as np
         import torch
 
-        if self.derivative_mode != "autograd":
-            return
         if min(nx, ny, nz) < 1:
             raise ValueError("uniform derivative precomputation requires nx, ny, nz >= 1")
         if batch_size <= 0:
@@ -149,33 +147,97 @@ class TorchFieldAdapter:
         points = torch.stack(mesh, dim=-1).reshape(-1, 3)
         gradients = np.empty((points.shape[0], 3), dtype=np.float32)
         hessians = np.empty((points.shape[0], 3, 3), dtype=np.float32)
-        print(
-            "RidgeMesh: batching autograd derivatives for {} uniform-grid vertices "
-            "({} queries per CUDA batch).".format(points.shape[0], batch_size),
-            flush=True,
-        )
+        if self.derivative_mode == "autograd":
+            print(
+                "RidgeMesh: batching autograd derivatives for {} uniform-grid vertices "
+                "({} queries per CUDA batch).".format(points.shape[0], batch_size),
+                flush=True,
+            )
+            for first in range(0, points.shape[0], batch_size):
+                last = min(first + batch_size, points.shape[0])
+                batch = points[first:last].detach().clone().requires_grad_(True)
+                query = batch.transpose(0, 1).unsqueeze(0)
+                with torch.enable_grad():
+                    values = self._udf_from_output(self.model(self.context, query)).reshape(-1)
+                    if values.numel() != batch.shape[0]:
+                        raise ValueError(
+                            "the model must return one scalar UDF value for every batched query"
+                        )
+                    gradient = torch.autograd.grad(
+                        values, batch, grad_outputs=torch.ones_like(values), create_graph=True
+                    )[0]
+                    rows = [
+                        torch.autograd.grad(gradient[:, axis].sum(), batch, retain_graph=axis < 2)[0]
+                        for axis in range(3)
+                    ]
+                    hessian = torch.stack(rows, dim=1)
 
-        for first in range(0, points.shape[0], batch_size):
-            last = min(first + batch_size, points.shape[0])
-            batch = points[first:last].detach().clone().requires_grad_(True)
-            query = batch.transpose(0, 1).unsqueeze(0)
-            with torch.enable_grad():
-                values = self._udf_from_output(self.model(self.context, query)).reshape(-1)
-                if values.numel() != batch.shape[0]:
-                    raise ValueError(
-                        "the model must return one scalar UDF value for every batched query"
+                gradients[first:last] = gradient.detach().cpu().numpy()
+                hessians[first:last] = hessian.detach().cpu().numpy()
+        else:
+            # A 3-D central-difference Hessian needs 19 field samples per
+            # vertex: the center, six axis neighbours, and twelve mixed-term
+            # corners. Evaluate the whole 19-point stencil for every base
+            # batch at once, then cache the assembled derivatives for C++.
+            h = self.finite_difference_step
+            offsets = [torch.zeros(3, device=self.device, dtype=self.dtype)]
+            axis_indices = []
+            for axis in range(3):
+                direction = torch.zeros(3, device=self.device, dtype=self.dtype)
+                direction[axis] = h
+                axis_indices.append((len(offsets), len(offsets) + 1))
+                offsets.extend((direction, -direction))
+            mixed_indices = {}
+            for first_axis in range(3):
+                for second_axis in range(first_axis + 1, 3):
+                    first_direction = torch.zeros(3, device=self.device, dtype=self.dtype)
+                    second_direction = torch.zeros(3, device=self.device, dtype=self.dtype)
+                    first_direction[first_axis] = h
+                    second_direction[second_axis] = h
+                    mixed_indices[(first_axis, second_axis)] = tuple(
+                        range(len(offsets), len(offsets) + 4)
                     )
-                gradient = torch.autograd.grad(
-                    values, batch, grad_outputs=torch.ones_like(values), create_graph=True
-                )[0]
-                rows = [
-                    torch.autograd.grad(gradient[:, axis].sum(), batch, retain_graph=axis < 2)[0]
-                    for axis in range(3)
-                ]
-                hessian = torch.stack(rows, dim=1)
-
-            gradients[first:last] = gradient.detach().cpu().numpy()
-            hessians[first:last] = hessian.detach().cpu().numpy()
+                    offsets.extend((
+                        first_direction + second_direction,
+                        first_direction - second_direction,
+                        -first_direction + second_direction,
+                        -first_direction - second_direction,
+                    ))
+            offsets = torch.stack(offsets)
+            print(
+                "RidgeMesh: batching finite-difference derivatives for {} uniform-grid vertices "
+                "({} base vertices and {} stencil queries per CUDA batch).".format(
+                    points.shape[0], batch_size, len(offsets) * batch_size
+                ),
+                flush=True,
+            )
+            for first in range(0, points.shape[0], batch_size):
+                last = min(first + batch_size, points.shape[0])
+                batch = points[first:last]
+                stencil_points = (batch.unsqueeze(0) + offsets.unsqueeze(1)).reshape(-1, 3)
+                query = stencil_points.transpose(0, 1).unsqueeze(0)
+                with torch.no_grad():
+                    values = self._udf_from_output(self.model(self.context, query)).reshape(
+                        len(offsets), last - first
+                    )
+                center = values[0]
+                gradient = torch.empty((last - first, 3), device=self.device, dtype=self.dtype)
+                hessian = torch.zeros((last - first, 3, 3), device=self.device, dtype=self.dtype)
+                for axis, (positive_index, negative_index) in enumerate(axis_indices):
+                    positive, negative = values[positive_index], values[negative_index]
+                    gradient[:, axis] = (positive - negative) / (2.0 * h)
+                    hessian[:, axis, axis] = (positive - 2.0 * center + negative) / (h * h)
+                for (first_axis, second_axis), indices in mixed_indices.items():
+                    positive_positive, positive_negative, negative_positive, negative_negative = (
+                        values[index] for index in indices
+                    )
+                    mixed = (
+                        positive_positive - positive_negative - negative_positive + negative_negative
+                    ) / (4.0 * h * h)
+                    hessian[:, first_axis, second_axis] = mixed
+                    hessian[:, second_axis, first_axis] = mixed
+                gradients[first:last] = gradient.cpu().numpy()
+                hessians[first:last] = hessian.cpu().numpy()
 
         self._uniform_grid_samples = {
             "lower": lower,
