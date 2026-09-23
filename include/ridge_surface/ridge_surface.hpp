@@ -46,6 +46,11 @@ enum class RefinementTarget {
   ridges_and_valleys,
 };
 
+enum class PolygonTriangulation {
+  center_fan, // add the polygon centroid and connect it to every boundary edge
+  vertex_fan, // notebook's tess[poly]: fan from the first boundary vertex
+};
+
 // Adaptive, conforming longest-edge bisection of the initial TET6 grid.
 // A zero minimum_edge_length matches the notebook: every tetrahedron that can
 // contain the selected ridge/valley condition is eligible until max_splits.
@@ -74,12 +79,20 @@ struct SurfaceOptions {
   // The default disables the gate.
   double minimum_ridge_field_value = -std::numeric_limits<double>::infinity();
   double finite_difference_step = 1e-4; // only used by the scalar-field overload
+  bool retain_dual_polygons = false;     // optional pre-triangulation rings
+  PolygonTriangulation polygon_triangulation = PolygonTriangulation::center_fan;
 };
 struct Triangle { std::array<std::size_t,3> indices; };
+struct Polygon { std::vector<std::size_t> indices; };
 struct SurfaceMesh {
   std::vector<Vec3> vertices;
+  // The first dual_vertex_count entries are tetrahedron dual vertices.
+  // Center-fan triangulation appends one more vertex per polygon after them.
+  std::size_t dual_vertex_count = 0;
   std::vector<Triangle> ridge_triangles;
   std::vector<Triangle> valley_triangles;
+  std::vector<Polygon> ridge_polygons;
+  std::vector<Polygon> valley_polygons;
 };
 
 // Extract strong height ridges and valleys, following height_ridge.nb.

@@ -3,6 +3,8 @@
 from .ridge_surface import (
     Bounds3D,
     LongestEdgeRefinementOptions,
+    Polygon,
+    PolygonTriangulation,
     RefinementTarget,
     SurfaceMesh,
     SurfaceOptions,
@@ -16,6 +18,8 @@ from .torch_adapter import TorchFieldAdapter, extract_torch_udf
 __all__ = [
     "Bounds3D",
     "LongestEdgeRefinementOptions",
+    "Polygon",
+    "PolygonTriangulation",
     "RefinementTarget",
     "SurfaceMesh",
     "SurfaceOptions",

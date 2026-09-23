@@ -208,8 +208,10 @@ refine.minimum_edge_length = 0.01
 options.longest_edge_refinement = refine
 ```
 
-`result.vertices` are the dual vertices (one centroid for each active Kuhn
-tetrahedron); `ridge_triangles` and `valley_triangles` index that array.
+The first `result.dual_vertex_count` entries of `result.vertices` are the
+tetrahedron dual vertices (averages of crossing points). With the default
+center-fan triangulation, the remaining entries are polygon centers;
+`ridge_triangles` and `valley_triangles` index the full vertex array.
 
 ## Correspondence to the notebooks
 
@@ -246,5 +248,18 @@ wireframe.
 
 `ellipsoid_example` is a separate analytic example for
 \(F(x) = -(x^2/a^2 + y^2/b^2 + z^2/c^2 - 1)^2\). It writes
-`ellipsoid_ridge.ply`, a uniform-grid ridge mesh for an ellipsoid with
-semi-axes \(a=0.75\), \(b=0.52\), and \(c=0.38\).
+`ellipsoid_ridge.ply`, a uniform-grid ridge mesh for a flattened sphere
+with semi-axes \(a=b=0.75\) and \(c=0.25\). It uses the default center-fan
+triangulation and writes only this one mesh. Set
+`SurfaceOptions::retain_dual_polygons` to access the ordered dual-vertex rings
+from the C++ API; the option is disabled by default to avoid storing them for
+large neural fields.
+
+By default, each ring is triangulated around a new vertex at the arithmetic
+mean of its dual vertices (`PolygonTriangulation::center_fan`). This adds one
+triangle per polygon edge. The original Mathematica-style fan from the first
+polygon vertex remains available with
+`options.polygon_triangulation = PolygonTriangulation::vertex_fan` (or
+`rs.PolygonTriangulation.vertex_fan` in Python). `SurfaceMesh::dual_vertex_count`
+separates the original tetrahedron dual vertices from the appended polygon
+centers.

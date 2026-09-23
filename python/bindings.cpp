@@ -93,6 +93,10 @@ PYBIND11_MODULE(ridge_surface, module) {
         .value("valleys", RefinementTarget::valleys)
         .value("ridges_and_valleys", RefinementTarget::ridges_and_valleys);
 
+    py::enum_<PolygonTriangulation>(module, "PolygonTriangulation")
+        .value("center_fan", PolygonTriangulation::center_fan)
+        .value("vertex_fan", PolygonTriangulation::vertex_fan);
+
     py::class_<LongestEdgeRefinementOptions>(module, "LongestEdgeRefinementOptions")
         .def(py::init<>())
         .def_readwrite("target", &LongestEdgeRefinementOptions::target)
@@ -111,15 +115,23 @@ PYBIND11_MODULE(ridge_surface, module) {
         .def_readwrite("root_tolerance", &SurfaceOptions::root_tolerance)
         .def_readwrite("minimum_curvature_sum", &SurfaceOptions::minimum_curvature_sum)
         .def_readwrite("minimum_ridge_field_value", &SurfaceOptions::minimum_ridge_field_value)
-        .def_readwrite("finite_difference_step", &SurfaceOptions::finite_difference_step);
+        .def_readwrite("finite_difference_step", &SurfaceOptions::finite_difference_step)
+        .def_readwrite("retain_dual_polygons", &SurfaceOptions::retain_dual_polygons)
+        .def_readwrite("polygon_triangulation", &SurfaceOptions::polygon_triangulation);
 
     py::class_<Triangle>(module, "Triangle")
         .def_readonly("indices", &Triangle::indices);
 
+    py::class_<Polygon>(module, "Polygon")
+        .def_readonly("indices", &Polygon::indices);
+
     py::class_<SurfaceMesh>(module, "SurfaceMesh")
         .def_readonly("vertices", &SurfaceMesh::vertices)
+        .def_readonly("dual_vertex_count", &SurfaceMesh::dual_vertex_count)
         .def_readonly("ridge_triangles", &SurfaceMesh::ridge_triangles)
-        .def_readonly("valley_triangles", &SurfaceMesh::valley_triangles);
+        .def_readonly("valley_triangles", &SurfaceMesh::valley_triangles)
+        .def_readonly("ridge_polygons", &SurfaceMesh::ridge_polygons)
+        .def_readonly("valley_polygons", &SurfaceMesh::valley_polygons);
 
     module.def(
         "extract_height_ridges",

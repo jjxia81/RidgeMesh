@@ -380,8 +380,10 @@ void append_surface_polygons(
     const std::vector<CrossingEdge>& crossing_edges,
     int requested_label,
     const mtet::MTetMesh& grid_mesh,
-    const std::vector<Vec3>& surface_vertices,
+    std::vector<Vec3>& surface_vertices,
     const std::vector<std::size_t>& surface_vertex_by_tet,
+    PolygonTriangulation triangulation,
+    std::vector<Polygon>* output_polygons,
     std::vector<Triangle>& output_triangles) {
     for (const CrossingEdge& edge : crossing_edges) {
         if (edge.label != requested_label) {
@@ -421,8 +423,21 @@ void append_surface_polygons(
             return left_angle < right_angle;
         });
 
-        for (std::size_t index = 1; index + 1 < ring.size(); ++index) {
-            output_triangles.push_back({{ring[0], ring[index], ring[index + 1]}});
+        if (output_polygons != nullptr) {
+            output_polygons->push_back({ring});
+        }
+
+        if (triangulation == PolygonTriangulation::center_fan) {
+            const std::size_t center_index = surface_vertices.size();
+            surface_vertices.push_back(center);
+            for (std::size_t index = 0; index < ring.size(); ++index) {
+                output_triangles.push_back({{
+                    center_index, ring[index], ring[(index + 1) % ring.size()]}});
+            }
+        } else {
+            for (std::size_t index = 1; index + 1 < ring.size(); ++index) {
+                output_triangles.push_back({{ring[0], ring[index], ring[index + 1]}});
+            }
         }
     }
 }
@@ -519,11 +534,19 @@ SurfaceMesh extract_height_ridges_from_grid(
             crossing_sum_by_tet[tet_index] / static_cast<double>(crossing_count_by_tet[tet_index]));
     }
 
+    surface.dual_vertex_count = surface.vertices.size();
+
     // 5. Make one dual polygon per crossing edge and split it into triangles.
     append_surface_polygons(crossing_edges, 1, coarse_grid, surface.vertices,
-        surface_vertex_by_tet, surface.ridge_triangles);
+        surface_vertex_by_tet,
+        options.polygon_triangulation,
+        options.retain_dual_polygons ? &surface.ridge_polygons : nullptr,
+        surface.ridge_triangles);
     append_surface_polygons(crossing_edges, -1, coarse_grid, surface.vertices,
-        surface_vertex_by_tet, surface.valley_triangles);
+        surface_vertex_by_tet,
+        options.polygon_triangulation,
+        options.retain_dual_polygons ? &surface.valley_polygons : nullptr,
+        surface.valley_triangles);
     return surface;
 }
 

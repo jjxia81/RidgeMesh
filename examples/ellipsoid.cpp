@@ -38,7 +38,8 @@ int main() {
     // The surface q(x)=1 is an ellipsoid. F=-((q-1)^2) is smooth and has a
     // maximum of zero along that surface, so it is suitable for height-ridge
     // extraction even though a raw UDF would have a derivative cusp there.
-    constexpr std::array<double, 3> radii{0.75, 0.52, 0.38};
+    // Equal horizontal radii make this a sphere compressed along z.
+    constexpr std::array<double, 3> radii{0.75, 0.75, 0.25};
     constexpr std::array<double, 3> inverse_radius_squared{
         1.0 / (radii[0] * radii[0]),
         1.0 / (radii[1] * radii[1]),
@@ -79,7 +80,7 @@ int main() {
 
     // Offset the x bound so the ellipsoid does not coincide with a grid plane.
     mtet::MTetMesh grid = mtet::generate_tet_grid(
-        {64, 64, 64}, {-0.98, -0.65, -0.48}, {1.02, 0.65, 0.48}, mtet::TET6);
+        {64, 64, 64}, {-0.98, -1.0, -0.40}, {1.02, 1.0, 0.40}, mtet::TET6);
     SurfaceOptions options;
     options.surface_target = RefinementTarget::ridges;
 
@@ -91,7 +92,8 @@ int main() {
 
     std::cout << "ellipsoid grid: " << grid.get_num_vertices() << " vertices, "
               << grid.get_num_tets() << " tetrahedra\n"
-              << "ellipsoid ridge: " << surface.vertices.size() << " dual vertices, "
+              << "ellipsoid ridge: " << surface.dual_vertex_count << " dual vertices, "
+              << surface.vertices.size() - surface.dual_vertex_count << " polygon centers, "
               << surface.ridge_triangles.size() << " triangles\n"
               << "wrote ellipsoid_ridge.ply\n";
 }
