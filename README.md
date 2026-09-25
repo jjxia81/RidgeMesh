@@ -94,8 +94,12 @@ Python callbacks returning a length-3 gradient and a 3-by-3 Hessian.
 
 `extract_torch_udf` accepts a model following GeoUDF's
 `model(input_dict, query)` convention. It evaluates the scalar field and
-computes its gradient and Hessian with the selected derivative methods;
-the model's separately learned `udf_grad` output is not used.
+computes its gradient and Hessian with the selected derivative methods.
+Set `gradient_mode="network"` to use a matching gradient returned as the
+model's second output. For GeoUDF's field `F=-UDF²`, return
+`(F, -2 * UDF * udf_grad)` from the wrapper; `udf_grad` is a learned,
+unit-normalized direction, so this is an approximation rather than the exact
+derivative of `F`.
 
 ```python
 import ridgemesh as rm
@@ -108,15 +112,19 @@ options.longest_edge_refinement.max_splits = 1000
 options.longest_edge_refinement.minimum_edge_length = .01
 
 # `model` is a loaded GeoUDF torch model and `input_dict` is its prepared
-# context (for example, its point cloud). The adapter constructs queries with
-# GeoUDF's expected shape (1, 3, 1).
+# context. The adapter constructs GeoUDF queries with shape (1, 3, M).
+def ridge_field(context, query):
+    udf, udf_grad = model(context, query)
+    return -(udf * udf), -2 * udf.unsqueeze(-1) * udf_grad
+
 mesh = rm.extract_torch_udf(
-    model,
+    ridge_field,
     input_dict,
     rm.Bounds3D(rm.Vec3(-1, -1, -1), rm.Vec3(1, 1, 1)),
     options,
     device="cuda",
     derivative_mode="finite_difference",
+    gradient_mode="finite_difference",
     finite_difference_step=5e-3,
 )
 
@@ -125,19 +133,17 @@ figure, axes = plot.plot_mesh(mesh, show_valleys=False, title="GeoUDF ridge")
 figure.savefig("geoudf_ridge.png", dpi=180)
 ```
 
-The default adapter mode uses autograd for both derivatives. Set
-`gradient_mode="finite_difference"` to compute only the gradient from six
-central scalar-field samples while keeping the selected Hessian backend.
-The GeoUDF batch script selects this numerical gradient by default. Set
-`derivative_mode="finite_difference"` to estimate both the gradient and
-Hessian from central differences of the scalar UDF, which is useful when a
-model's second-order autograd Hessian is unreliable. It needs 19 scalar UDF
-evaluations per uncached point, so start from a modest coarse grid for GeoUDF.
-For a numerical Hessian paired with an autograd gradient, set
-`hessian_backend="gradient_difference"` with `derivative_mode="autograd"`.
-It samples autograd gradients at the six axis neighbours, uses centered
-differences to form the Hessian, and symmetrizes it. Both numerical modes batch
-all uniform-grid samples when `uniform_grid_batch_size` is positive.
+The library adapter defaults to autograd for both derivatives. The GeoUDF batch
+script defaults to central function-value differences for both the gradient
+and Hessian. For the same combination through the library API, set
+`gradient_mode="finite_difference"` and `derivative_mode="finite_difference"`.
+The 3-D Hessian stencil needs 19 scalar-field samples per grid vertex; uniform
+grid samples are batched when `uniform_grid_batch_size` is positive.
+
+To use GeoUDF's learned gradient instead, select `gradient_mode="network"`.
+It can be paired with the same numerical Hessian, or with
+`hessian_backend="gradient_difference"` to form a Hessian from differences of
+the learned gradient. The gradient and Hessian sources are independent.
 
 To test that finite-difference path independently of a trained model, run the
 known-sphere smoke test. It uses a smooth scalar field with its ridge exactly

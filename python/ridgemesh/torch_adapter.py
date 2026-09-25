@@ -1,8 +1,8 @@
 """PyTorch and GeoUDF adapters for the RidgeMesh native surfacer.
 
-The GeoUDF model's learned gradient output is useful for its own reconstruction
-pipeline, but RidgeMesh needs derivatives of the *scalar UDF itself*. This
-adapter supports autograd and central differences of that scalar field.
+The adapter accepts scalar-field gradients from a model output, autograd, or
+central differences. A GeoUDF caller must transform its learned UDF gradient
+when it transforms the UDF into a different scalar field.
 """
 
 from __future__ import annotations
@@ -32,14 +32,18 @@ class TorchFieldAdapter:
     """Expose a differentiable PyTorch UDF as RidgeMesh derivative callbacks.
 
     ``model(context, query)`` must return a scalar UDF tensor, a tuple whose
-    first item is the UDF, or a mapping containing ``"udf"``. GeoUDF's native
+    first item is the UDF, or a mapping containing ``"udf"``. For
+    ``gradient_mode="network"``, the second tuple item (or ``"gradient"``
+    mapping entry) must approximate the gradient of that same scalar field.
+    GeoUDF's native
     convention is a query tensor with shape ``(B, 3, M)``; this adapter uses
     ``(1, 3, 1)`` for each requested point.
 
     Set ``gradient_mode="finite_difference"`` to estimate only the gradient
     from central scalar-UDF differences while retaining the chosen Hessian
-    backend. Set ``derivative_mode="finite_difference"`` to estimate both
-    derivatives from scalar differences. Derivatives are cached by point
+    backend. Set ``derivative_mode="finite_difference"`` to estimate the
+    Hessian from scalar differences; the selected gradient mode remains
+    independent. Derivatives are cached by point
     because the C++ surfacer asks for a Hessian and gradient at the same
     locations. Set ``uniform_grid_batch_size`` in ``extract_torch_udf`` to
     precompute either derivative mode in CUDA batches on a uniform base grid.
@@ -69,10 +73,8 @@ class TorchFieldAdapter:
             raise ValueError("derivative_mode must be 'autograd' or 'finite_difference'")
         if gradient_mode is None:
             gradient_mode = derivative_mode
-        if gradient_mode not in ("autograd", "finite_difference"):
-            raise ValueError("gradient_mode must be 'autograd' or 'finite_difference'")
-        if derivative_mode == "finite_difference" and gradient_mode != "finite_difference":
-            raise ValueError("finite_difference derivative_mode requires a finite_difference gradient")
+        if gradient_mode not in ("autograd", "finite_difference", "network"):
+            raise ValueError("gradient_mode must be 'autograd', 'finite_difference', or 'network'")
         if hessian_backend not in ("grad", "functional", "gradient_difference"):
             raise ValueError(
                 "hessian_backend must be 'grad', 'functional', or 'gradient_difference'"
@@ -132,6 +134,42 @@ class TorchFieldAdapter:
                 columns.append((positive - negative) / (2.0 * h))
         return torch.stack(columns, dim=1)
 
+    def _network_gradients_batch(self, points):
+        """Read approximate gradients of the selected scalar field from the model."""
+        import torch
+
+        with torch.no_grad():
+            output = self.model(self.context, points.transpose(0, 1).unsqueeze(0))
+        if isinstance(output, Mapping):
+            gradient = output.get("gradient")
+        elif isinstance(output, (tuple, list)) and len(output) > 1:
+            gradient = output[1]
+        else:
+            gradient = None
+        if gradient is None:
+            raise ValueError("network gradient mode requires a model gradient output")
+        if gradient.shape == (1, points.shape[0], 3):
+            gradient = gradient[0]
+        if gradient.shape != (points.shape[0], 3):
+            raise ValueError("network gradients must have shape (1, N, 3) or (N, 3)")
+        if not torch.isfinite(gradient).all():
+            raise ValueError("network gradients contain non-finite values")
+        return gradient
+
+    def _autograd_gradients_batch(self, points):
+        """Differentiate the scalar field once for each point in a batch."""
+        import torch
+
+        input_points = points.detach().clone().requires_grad_(True)
+        with torch.enable_grad():
+            values = self._udf_from_output(
+                self.model(self.context, input_points.transpose(0, 1).unsqueeze(0))
+            ).reshape(-1)
+            if values.numel() != input_points.shape[0]:
+                raise ValueError("the model must return one scalar UDF value per query")
+            gradients = torch.autograd.grad(values.sum(), input_points)[0]
+        return gradients.detach()
+
     def _evaluate_derivatives(self, x: float, y: float, z: float):
         key = (float(x), float(y), float(z))
         cached = self._cache.get(key)
@@ -144,10 +182,29 @@ class TorchFieldAdapter:
 
         if self.derivative_mode == "finite_difference":
             result = self._evaluate_finite_difference_derivatives(key)
+            if self.gradient_mode == "network":
+                point = self._point_tensor(key)
+                result = (
+                    tuple(float(value) for value in self._network_gradients_batch(point)[0].cpu()),
+                    result[1],
+                )
+            elif self.gradient_mode == "autograd":
+                point = self._point_tensor(key)
+                result = (
+                    tuple(float(value) for value in self._autograd_gradients_batch(point)[0].cpu()),
+                    result[1],
+                )
         else:
             result = self._evaluate_autograd_derivatives(key)
         self._cache[key] = result
         return result
+
+    def _point_tensor(self, coordinates):
+        import torch
+
+        return torch.tensor(
+            coordinates, device=self.device, dtype=self.dtype
+        ).reshape(1, 3)
 
     def precompute_uniform_grid(self, bounds, nx: int, ny: int, nz: int, batch_size: int) -> None:
         """Batch derivatives at all vertices of a uniform MTet grid.
@@ -207,13 +264,15 @@ class TorchFieldAdapter:
 
                 if self.gradient_mode == "finite_difference":
                     gradient = self._finite_difference_gradients_batch(batch.detach())
+                elif self.gradient_mode == "network":
+                    gradient = self._network_gradients_batch(batch.detach())
                 gradients[first:last] = gradient.detach().cpu().numpy()
                 hessians[first:last] = hessian.detach().cpu().numpy()
         elif self.derivative_mode == "finite_difference":
             # A 3-D central-difference Hessian needs 19 field samples per
             # vertex: the center, six axis neighbours, and twelve mixed-term
             # corners. Evaluate the whole 19-point stencil for every base
-            # batch at once, then cache the assembled derivatives for C++.
+            # batch at once; the gradient can use a separately selected source.
             h = self.finite_difference_step
             offsets = [torch.zeros(3, device=self.device, dtype=self.dtype)]
             axis_indices = []
@@ -240,7 +299,7 @@ class TorchFieldAdapter:
                     ))
             offsets = torch.stack(offsets)
             print(
-                "RidgeMesh: batching finite-difference derivatives for {} uniform-grid vertices "
+                "RidgeMesh: batching finite-difference Hessians for {} uniform-grid vertices "
                 "({} base vertices and {} stencil queries per CUDA batch).".format(
                     points.shape[0], batch_size, len(offsets) * batch_size
                 ),
@@ -271,6 +330,10 @@ class TorchFieldAdapter:
                     ) / (4.0 * h * h)
                     hessian[:, first_axis, second_axis] = mixed
                     hessian[:, second_axis, first_axis] = mixed
+                if self.gradient_mode == "network":
+                    gradient = self._network_gradients_batch(batch)
+                elif self.gradient_mode == "autograd":
+                    gradient = self._autograd_gradients_batch(batch)
                 gradients[first:last] = gradient.cpu().numpy()
                 hessians[first:last] = hessian.cpu().numpy()
         else:
@@ -295,18 +358,24 @@ class TorchFieldAdapter:
             for first in range(0, points.shape[0], batch_size):
                 last = min(first + batch_size, points.shape[0])
                 batch = points[first:last]
-                stencil_points = (batch.unsqueeze(0) + offsets.unsqueeze(1)).reshape(-1, 3)
-                stencil_points.requires_grad_(True)
-                query = stencil_points.transpose(0, 1).unsqueeze(0)
-                with torch.enable_grad():
-                    values = self._udf_from_output(self.model(self.context, query)).reshape(-1)
-                    if values.numel() != stencil_points.shape[0]:
-                        raise ValueError(
-                            "the model must return one scalar UDF value for every batched query"
-                        )
-                    all_gradients = torch.autograd.grad(
-                        values, stencil_points, grad_outputs=torch.ones_like(values)
-                    )[0].reshape(len(offsets), last - first, 3)
+                if self.gradient_mode == "network":
+                    all_gradients = torch.stack([
+                        self._network_gradients_batch(batch + offset)
+                        for offset in offsets
+                    ])
+                else:
+                    stencil_points = (batch.unsqueeze(0) + offsets.unsqueeze(1)).reshape(-1, 3)
+                    stencil_points.requires_grad_(True)
+                    query = stencil_points.transpose(0, 1).unsqueeze(0)
+                    with torch.enable_grad():
+                        values = self._udf_from_output(self.model(self.context, query)).reshape(-1)
+                        if values.numel() != stencil_points.shape[0]:
+                            raise ValueError(
+                                "the model must return one scalar UDF value for every batched query"
+                            )
+                        all_gradients = torch.autograd.grad(
+                            values, stencil_points, grad_outputs=torch.ones_like(values)
+                        )[0].reshape(len(offsets), last - first, 3)
                 gradient = all_gradients[0]
                 hessian = torch.empty((last - first, 3, 3), device=self.device, dtype=self.dtype)
                 for axis in range(3):
@@ -358,15 +427,15 @@ class TorchFieldAdapter:
         point = torch.tensor(point_coordinates, device=self.device, dtype=self.dtype, requires_grad=True)
         query = point.reshape(1, 3, 1)
         with torch.enable_grad():
-            udf = self._udf_from_output(self.model(self.context, query))
-            if udf.numel() != 1:
-                raise ValueError("the model must return one scalar UDF value for a (1, 3, 1) query")
-            scalar_udf = udf.reshape(())
-            gradient = torch.autograd.grad(
-                scalar_udf,
-                point,
-                create_graph=self.hessian_backend != "gradient_difference",
-            )[0]
+            if self.hessian_backend != "gradient_difference" or self.gradient_mode != "network":
+                udf = self._udf_from_output(self.model(self.context, query))
+                if udf.numel() != 1:
+                    raise ValueError("the model must return one scalar UDF value for a (1, 3, 1) query")
+                gradient = torch.autograd.grad(
+                    udf.reshape(()),
+                    point,
+                    create_graph=self.hessian_backend != "gradient_difference",
+                )[0]
             if self.hessian_backend == "functional":
                 def scalar_from_point(input_point):
                     input_query = input_point.reshape(1, 3, 1)
@@ -405,13 +474,21 @@ class TorchFieldAdapter:
                     negative = point.detach().clone()
                     positive[axis] += h
                     negative[axis] -= h
-                    columns.append((gradient_at(positive) - gradient_at(negative)) / (2.0 * h))
+                    if self.gradient_mode == "network":
+                        positive_gradient = self._network_gradients_batch(positive.reshape(1, 3))[0]
+                        negative_gradient = self._network_gradients_batch(negative.reshape(1, 3))[0]
+                    else:
+                        positive_gradient = gradient_at(positive)
+                        negative_gradient = gradient_at(negative)
+                    columns.append((positive_gradient - negative_gradient) / (2.0 * h))
                 hessian = torch.stack(columns, dim=1)
                 hessian = 0.5 * (hessian + hessian.transpose(0, 1))
                 hessian_rows = [hessian[index] for index in range(3)]
 
         if self.gradient_mode == "finite_difference":
             gradient = self._finite_difference_gradients_batch(point.detach().reshape(1, 3))[0]
+        elif self.gradient_mode == "network":
+            gradient = self._network_gradients_batch(point.detach().reshape(1, 3))[0]
         gradient_value = tuple(float(value) for value in gradient.detach().cpu())
         hessian_value = [
             [float(value) for value in row.detach().cpu()]
@@ -475,7 +552,7 @@ class TorchFieldAdapter:
         return self._evaluate_derivatives(x, y, z)[0]
 
     def hessian(self, x: float, y: float, z: float):
-        """Return the autograd Hessian in the format expected by pybind11."""
+        """Return the selected scalar-field Hessian in the format expected by pybind11."""
         return self._evaluate_derivatives(x, y, z)[1]
 
     def value(self, x: float, y: float, z: float):
@@ -503,11 +580,12 @@ def extract_torch_udf(
     query tensor of shape ``(1, 3, 1)``. Set ``derivative_mode`` to
     ``"finite_difference"`` to avoid second-order autograd. Set
     ``gradient_mode="finite_difference"`` to replace only the gradient with
-    central differences of the same scalar field. With autograd,
+    central differences of the same scalar field. Use ``"network"`` when the
+    model returns a matching approximate gradient as its second output. With autograd,
     ``hessian_backend="functional"`` uses ``torch.autograd.functional.hessian``;
     ``"grad"`` uses repeated ``torch.autograd.grad`` calls; and
-    ``"gradient_difference"`` uses autograd gradients with a central-difference
-    Hessian. Set
+    ``"gradient_difference"`` differences the selected autograd or network
+    gradient. Set
     ``uniform_grid_batch_size`` to batch all initial uniform-grid derivatives
     on the selected Torch device before native extraction. Returns the native
     ``SurfaceMesh``.
