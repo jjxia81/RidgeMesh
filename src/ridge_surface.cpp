@@ -427,6 +427,9 @@ void append_surface_polygons(
             output_polygons->push_back({ring});
         }
 
+        if (triangulation == PolygonTriangulation::polygons_only) {
+            continue;
+        }
         if (triangulation == PolygonTriangulation::center_fan) {
             const std::size_t center_index = surface_vertices.size();
             surface_vertices.push_back(center);
@@ -536,16 +539,18 @@ SurfaceMesh extract_height_ridges_from_grid(
 
     surface.dual_vertex_count = surface.vertices.size();
 
-    // 5. Make one dual polygon per crossing edge and split it into triangles.
+    // 5. Make one dual polygon per crossing edge; triangulation is optional.
+    const bool retain_polygons = options.retain_dual_polygons ||
+        options.polygon_triangulation == PolygonTriangulation::polygons_only;
     append_surface_polygons(crossing_edges, 1, coarse_grid, surface.vertices,
         surface_vertex_by_tet,
         options.polygon_triangulation,
-        options.retain_dual_polygons ? &surface.ridge_polygons : nullptr,
+        retain_polygons ? &surface.ridge_polygons : nullptr,
         surface.ridge_triangles);
     append_surface_polygons(crossing_edges, -1, coarse_grid, surface.vertices,
         surface_vertex_by_tet,
         options.polygon_triangulation,
-        options.retain_dual_polygons ? &surface.valley_polygons : nullptr,
+        retain_polygons ? &surface.valley_polygons : nullptr,
         surface.valley_triangles);
     return surface;
 }

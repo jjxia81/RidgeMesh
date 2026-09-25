@@ -49,6 +49,7 @@ enum class RefinementTarget {
 enum class PolygonTriangulation {
   center_fan, // add the polygon centroid and connect it to every boundary edge
   vertex_fan, // notebook's tess[poly]: fan from the first boundary vertex
+  polygons_only, // keep dual polygons without making triangle or center vertices
 };
 
 // Adaptive, conforming longest-edge bisection of the initial TET6 grid.
@@ -79,7 +80,7 @@ struct SurfaceOptions {
   // The default disables the gate.
   double minimum_ridge_field_value = -std::numeric_limits<double>::infinity();
   double finite_difference_step = 1e-4; // only used by the scalar-field overload
-  bool retain_dual_polygons = false;     // optional pre-triangulation rings
+  bool retain_dual_polygons = false;     // optional with fan modes; implied by polygons_only
   PolygonTriangulation polygon_triangulation = PolygonTriangulation::center_fan;
 };
 struct Triangle { std::array<std::size_t,3> indices; };

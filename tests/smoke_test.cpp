@@ -69,4 +69,38 @@ int main() {
       expected_triangle_count != vertex_fan_mesh.ridge_triangles.size()) {
     throw std::runtime_error("notebook-style vertex fan changed");
   }
+
+  SurfaceOptions polygon_options = vertex_fan_options;
+  polygon_options.polygon_triangulation = PolygonTriangulation::polygons_only;
+  polygon_options.retain_dual_polygons = false; // polygon mode must retain faces itself
+  mtet::MTetMesh polygon_grid = mtet::generate_tet_grid(
+      {13, 12, 12}, {-1, -1, -1}, {1, 1, 1}, mtet::TET6);
+  const auto polygon_mesh = extract_height_ridges(analytic_field, polygon_grid, polygon_options);
+  if (polygon_mesh.ridge_polygons.empty() || !polygon_mesh.ridge_triangles.empty() ||
+      polygon_mesh.vertices.size() != polygon_mesh.dual_vertex_count) {
+    throw std::runtime_error("polygon-only ridge mode returned triangles or no polygons");
+  }
+  for (const Polygon& polygon : polygon_mesh.ridge_polygons) {
+    if (polygon.indices.size() < 3) {
+      throw std::runtime_error("polygon-only ridge face has fewer than three vertices");
+    }
+    for (const std::size_t index : polygon.indices) {
+      if (index >= polygon_mesh.dual_vertex_count) {
+        throw std::runtime_error("polygon-only ridge face references a non-dual vertex");
+      }
+    }
+  }
+
+  const DifferentialField3D valley_field{
+    [](const Vec3& p) { return Vec3{2.0 * p.x, 0.2 * p.y, 0.1 * p.z}; },
+    [](const Vec3&) { return Mat3{{{{2, 0, 0}}, {{0, 0.2, 0}}, {{0, 0, 0.1}}}}; },
+  };
+  polygon_options.surface_target = RefinementTarget::valleys;
+  mtet::MTetMesh valley_grid = mtet::generate_tet_grid(
+      {13, 12, 12}, {-1, -1, -1}, {1, 1, 1}, mtet::TET6);
+  const auto valley_mesh = extract_height_ridges(valley_field, valley_grid, polygon_options);
+  if (valley_mesh.valley_polygons.empty() || !valley_mesh.valley_triangles.empty() ||
+      valley_mesh.vertices.size() != valley_mesh.dual_vertex_count) {
+    throw std::runtime_error("polygon-only valley mode returned triangles or no polygons");
+  }
 }

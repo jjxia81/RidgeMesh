@@ -93,10 +93,9 @@ Python callbacks returning a length-3 gradient and a 3-by-3 Hessian.
 ### PyTorch / GeoUDF
 
 `extract_torch_udf` accepts a model following GeoUDF's
-`model(input_dict, query)` convention. It evaluates the scalar UDF and uses
-PyTorch autograd to obtain the gradient and Hessian required by RidgeMesh;
-the model's separately learned `udf_grad` output is not used as a Hessian
-substitute.
+`model(input_dict, query)` convention. It evaluates the scalar field and
+computes its gradient and Hessian with the selected derivative methods;
+the model's separately learned `udf_grad` output is not used.
 
 ```python
 import ridgemesh as rm
@@ -126,7 +125,10 @@ figure, axes = plot.plot_mesh(mesh, show_valleys=False, title="GeoUDF ridge")
 figure.savefig("geoudf_ridge.png", dpi=180)
 ```
 
-The default adapter mode uses autograd. Set
+The default adapter mode uses autograd for both derivatives. Set
+`gradient_mode="finite_difference"` to compute only the gradient from six
+central scalar-field samples while keeping the selected Hessian backend.
+The GeoUDF batch script selects this numerical gradient by default. Set
 `derivative_mode="finite_difference"` to estimate both the gradient and
 Hessian from central differences of the scalar UDF, which is useful when a
 model's second-order autograd Hessian is unreliable. It needs 19 scalar UDF
@@ -255,11 +257,23 @@ triangulation and writes only this one mesh. Set
 from the C++ API; the option is disabled by default to avoid storing them for
 large neural fields.
 
-By default, each ring is triangulated around a new vertex at the arithmetic
-mean of its dual vertices (`PolygonTriangulation::center_fan`). This adds one
-triangle per polygon edge. The original Mathematica-style fan from the first
-polygon vertex remains available with
-`options.polygon_triangulation = PolygonTriangulation::vertex_fan` (or
-`rs.PolygonTriangulation.vertex_fan` in Python). `SurfaceMesh::dual_vertex_count`
-separates the original tetrahedron dual vertices from the appended polygon
-centers.
+The example also accepts `--triangulation vertex_fan` or
+`--triangulation polygons_only`. Each invocation still writes just one PLY:
+`ellipsoid_ridge_vertex_fan.ply` or `ellipsoid_ridge_polygons.ply`, respectively.
+
+`SurfaceOptions::polygon_triangulation` selects one of three face outputs:
+
+- `PolygonTriangulation::center_fan` (default): add the arithmetic mean of
+  each polygon's dual vertices and connect it to every boundary edge.
+- `PolygonTriangulation::vertex_fan`: triangulate from the polygon's first
+  dual vertex, as in the Mathematica `tess` function; no centers are added.
+- `PolygonTriangulation::polygons_only`: return ordered polygon faces in
+  `ridge_polygons` / `valley_polygons`, with no triangles or center vertices.
+  This mode retains the polygons even when `retain_dual_polygons` is false.
+
+For example, set `options.polygon_triangulation =
+PolygonTriangulation::polygons_only` in C++, or
+`options.polygon_triangulation = rs.PolygonTriangulation.polygons_only` in
+Python. `SurfaceMesh::dual_vertex_count` separates the original tetrahedron
+dual vertices from any appended centers; in the latter two modes, it equals
+`vertices.size()`.

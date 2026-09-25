@@ -95,7 +95,8 @@ PYBIND11_MODULE(ridge_surface, module) {
 
     py::enum_<PolygonTriangulation>(module, "PolygonTriangulation")
         .value("center_fan", PolygonTriangulation::center_fan)
-        .value("vertex_fan", PolygonTriangulation::vertex_fan);
+        .value("vertex_fan", PolygonTriangulation::vertex_fan)
+        .value("polygons_only", PolygonTriangulation::polygons_only);
 
     py::class_<LongestEdgeRefinementOptions>(module, "LongestEdgeRefinementOptions")
         .def(py::init<>())
