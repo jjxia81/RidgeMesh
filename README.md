@@ -96,10 +96,10 @@ Python callbacks returning a length-3 gradient and a 3-by-3 Hessian.
 `model(input_dict, query)` convention. It evaluates the scalar field and
 computes its gradient and Hessian with the selected derivative methods.
 Set `gradient_mode="network"` to use a matching gradient returned as the
-model's second output. For GeoUDF's field `F=-UDF²`, return
-`(F, -2 * UDF * udf_grad)` from the wrapper; `udf_grad` is a learned,
-unit-normalized direction, so this is an approximation rather than the exact
-derivative of `F`.
+model's second output. For the optional GeoUDF network-gradient mode, use
+`F=-UDF` and return `(F, -udf_grad)` from the wrapper. GeoUDF's `udf_grad`
+is a learned, unit-normalized direction, so it is not guaranteed to equal
+the exact derivative of `UDF`.
 
 ```python
 import ridgemesh as rm
@@ -114,8 +114,8 @@ options.longest_edge_refinement.minimum_edge_length = .01
 # `model` is a loaded GeoUDF torch model and `input_dict` is its prepared
 # context. The adapter constructs GeoUDF queries with shape (1, 3, M).
 def ridge_field(context, query):
-    udf, udf_grad = model(context, query)
-    return -(udf * udf), -2 * udf.unsqueeze(-1) * udf_grad
+    udf, _ = model(context, query)
+    return -(udf * udf)
 
 mesh = rm.extract_torch_udf(
     ridge_field,
@@ -140,10 +140,16 @@ and Hessian. For the same combination through the library API, set
 The 3-D Hessian stencil needs 19 scalar-field samples per grid vertex; uniform
 grid samples are batched when `uniform_grid_batch_size` is positive.
 
-To use GeoUDF's learned gradient instead, select `gradient_mode="network"`.
-It can be paired with the same numerical Hessian, or with
-`hessian_backend="gradient_difference"` to form a Hessian from differences of
-the learned gradient. The gradient and Hessian sources are independent.
+The GeoUDF batch option `--ridgemesh-numerical-negative-udf` applies that same
+numerical gradient/Hessian stencil to `-UDF` instead of the default `-UDF²`.
+
+To use GeoUDF's learned gradient instead, wrap the model to return
+`(-udf, -udf_grad)` and select `gradient_mode="network"`. The numerical Hessian
+then comes from central differences of that negated network gradient, without
+the 19-point scalar-value stencil or a `-2 * udf` scaling factor. Each uniform
+grid batch queries the center and six axis offsets in one model call; adaptive
+points use the same seven-point gradient stencil. This option approximates
+ridges of `-UDF`, which is less smooth at zero than the default `-UDF²` field.
 
 To test that finite-difference path independently of a trained model, run the
 known-sphere smoke test. It uses a smooth scalar field with its ridge exactly
