@@ -119,6 +119,7 @@ PYBIND11_MODULE(ridge_surface, module) {
         .def_readwrite("pipeline", &LongestEdgeRefinementOptions::pipeline)
         .def_readwrite("curvature_zero_tolerance", &LongestEdgeRefinementOptions::curvature_zero_tolerance)
         .def_readwrite("refine_curvature_boundary", &LongestEdgeRefinementOptions::refine_curvature_boundary)
+        .def_readwrite("refine_orientation_boundary", &LongestEdgeRefinementOptions::refine_orientation_boundary)
         .def_readwrite("linearity_sampling", &LongestEdgeRefinementOptions::linearity_sampling)
         .def_readwrite("linearity_absolute_tolerance", &LongestEdgeRefinementOptions::linearity_absolute_tolerance)
         .def_readwrite("linearity_relative_tolerance", &LongestEdgeRefinementOptions::linearity_relative_tolerance);
@@ -135,6 +136,7 @@ PYBIND11_MODULE(ridge_surface, module) {
         .def_readwrite("root_tolerance", &SurfaceOptions::root_tolerance)
         .def_readwrite("minimum_curvature_sum", &SurfaceOptions::minimum_curvature_sum)
         .def_readwrite("ridge_curvature_filter", &SurfaceOptions::ridge_curvature_filter)
+        .def_readwrite("check_crossing_point_curvature", &SurfaceOptions::check_crossing_point_curvature)
         .def_readwrite("minimum_ridge_field_value", &SurfaceOptions::minimum_ridge_field_value)
         .def_readwrite("finite_difference_step", &SurfaceOptions::finite_difference_step)
         .def_readwrite("retain_dual_polygons", &SurfaceOptions::retain_dual_polygons)

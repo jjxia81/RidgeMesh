@@ -202,9 +202,11 @@ flowchart with a sampled directional-condition linearity check. For each tet:
    Set `refine_curvature_boundary = true` to restore that automatic trigger.
 2. Apply ridge/valley curvature eligibility. All negative vertex curvature sums
    reject a ridge tet (valley mode mirrors this). Mixed-curvature tets continue.
-3. Align the selected eigenvectors to vertex 0 and check all remaining
-   pairwise dot products. Any negative pair triggers orientation-boundary
-   refinement (Boundary I), even without a crossing.
+3. By default, align endpoint eigenvectors independently on each of the six
+   edges and test for directional crossings. If Boundary I is enabled, instead
+   align directions to vertex 0 and check remaining pairwise dot products;
+   a negative pair then triggers orientation-boundary refinement even without
+   a crossing.
 4. Require an oriented `c = gradient dot eigenvector` crossing and sufficient
    curvature strength. A tet failing this gate makes no linearity sample queries.
 5. As the final eligibility test, compare re-evaluated c at additional barycentric
@@ -212,7 +214,7 @@ flowchart with a sampled directional-condition linearity check. For each tet:
    difference exceeds `linearity_absolute_tolerance + linearity_relative_tolerance
    * max_abs_c` (scale includes the vertex and additional sampled values).
    The default is `LinearitySampling::cubic_16`: twelve edge samples at 1/3 and
-   2/3 plus four face centers, with absolute tolerance `1e-3` and relative
+   2/3 plus four face centers, with absolute tolerance `0.1` and relative
    tolerance `0`. This mode has no tet-center sample. The cheaper alternative,
    `LinearitySampling::face_centers_5`, uses four face centers and the tet center.
    Eigenvectors at all sample locations are aligned to the vertex-0 reference.
@@ -236,9 +238,24 @@ Python selection:
 ```python
 refine.linearity_sampling = rs.LinearitySampling.cubic_16  # default
 refine.linearity_sampling = rs.LinearitySampling.face_centers_5  # cheaper alternative
-refine.linearity_absolute_tolerance = 1e-3
+refine.linearity_absolute_tolerance = 0.1
 refine.linearity_relative_tolerance = 0.0
 ```
+
+Boundary I and Boundary II are both disabled by default. The default
+`refine.refine_orientation_boundary = False` tests each of the
+six tet edges independently. The second endpoint's eigenvector is sign-aligned
+to the first before testing for a strict c sign change. Any crossing edge makes
+the tet eligible for the final linearity test; curvature and stopping limits
+still apply. The `legacy_crossing` pipeline is unchanged and ignores this option.
+Set `refine.refine_orientation_boundary = True` to enable Boundary I, and
+`refine.refine_curvature_boundary = True` to enable Boundary II (use `true` in C++).
+The ellipsoid CLI provides `--enable-boundary-i` and `--enable-boundary-ii`;
+the corresponding `--disable-boundary-i` / `--disable-boundary-ii` flags are also accepted.
+Edge-local crossings can disagree around a non-orientable tet; this option does
+not guarantee consistent topology or prevent all off-surface refinement. With
+linearity enabled, its existing tet-reference interpolation remains a heuristic
+on those tets. Use `--linearity-sampling disabled` to test edge crossings alone.
 
 The separate `ellipsoid_linearity_example` starts from an adaptive 4x4x4 grid
 and lets you control the absolute tolerance from the command line:
@@ -250,11 +267,18 @@ and lets you control the absolute tolerance from the command line:
 On Ubuntu build the same CMake target and run
 `./build/ellipsoid_linearity_example --le 0.01`.
 The original `--linearity-absolute-tolerance` spelling remains accepted as an alias.
-To relax endpoint filtering during **surfacing only**, select
-`--ridge-curvature-filter crossing_point`. Either endpoint must satisfy
+The default filter during **surfacing only** is
+`--ridge-curvature-filter crossing_point` (the flag may be omitted). Either endpoint must satisfy
 `k1+k2 > 0` before testing the oriented directional crossing; the Hessian is
-then re-evaluated at that crossing and `k1+k3 > minimum_curvature_sum` must hold.
-The original `both_endpoints` filter remains the default. This changes neither
+optionally re-evaluated at that crossing to require `k1+k3 > minimum_curvature_sum`.
+This step 3 is disabled by default (`check_crossing_point_curvature = false`).
+Enable it with `--check-crossing-point-curvature`, or set
+`options.check_crossing_point_curvature = True` in Python (`true` in C++).
+With step 3 off, accepted directional crossings are not checked for root curvature;
+they are not guaranteed to be normal-direction maxima. Endpoint prechecking and
+any configured field-value filter still apply. The curvature-strength threshold
+still affects adaptive eligibility and the original `both_endpoints` mode.
+Select `--ridge-curvature-filter both_endpoints` to restore the original filter. This changes neither
 adaptive eligibility nor valley filtering and does not guarantee watertightness.
 The crossing-point example mesh gets a `_crossing_point` suffix for comparison.
 In Python set `options.ridge_curvature_filter = rs.RidgeCurvatureFilter.crossing_point`;

@@ -10,6 +10,17 @@
 #include "ridge_surface/ridge_surface.hpp"
 int main() try {
   using namespace ridge_surface;
+  const LongestEdgeRefinementOptions default_refinement;
+  if (default_refinement.refine_curvature_boundary || default_refinement.refine_orientation_boundary ||
+      default_refinement.linearity_absolute_tolerance != 0.1) {
+    throw std::runtime_error("boundary and linearity defaults are incorrect");
+  }
+  if (SurfaceOptions{}.ridge_curvature_filter != RidgeCurvatureFilter::crossing_point) {
+    throw std::runtime_error("crossing-point curvature filter is not the default");
+  }
+  if (SurfaceOptions{}.check_crossing_point_curvature) {
+    throw std::runtime_error("crossing-point curvature step 3 should default to disabled");
+  }
   // One endpoint fails k1+k2, the other passes. The actual root has k1+k3=.2.
   const DifferentialField3D crossing_curvature_field{
     [](const Vec3& p) { return Vec3{-2 * p.x, 0, 0}; },
@@ -22,6 +33,7 @@ int main() try {
   curvature_options.nx = 1;
   curvature_options.ny = curvature_options.nz = 2;
   curvature_options.surface_target = RefinementTarget::ridges;
+  curvature_options.ridge_curvature_filter = RidgeCurvatureFilter::both_endpoints;
   const Bounds3D curvature_bounds{{-1, -1, -1}, {1, 1, 1}};
   if (!extract_height_ridges(crossing_curvature_field, curvature_bounds, curvature_options).vertices.empty()) {
     throw std::runtime_error("original both-endpoint curvature filtering changed");
@@ -33,6 +45,11 @@ int main() try {
       throw std::runtime_error("either-endpoint precheck lost a valid crossing-point ridge");
     }
     curvature_options.minimum_curvature_sum = 1.0;
+    curvature_options.check_crossing_point_curvature = false;
+    if (extract_height_ridges(crossing_curvature_field, curvature_bounds, curvature_options).ridge_triangles.empty()) {
+      throw std::runtime_error("disabled step 3 still rejected crossing-point curvature");
+    }
+    curvature_options.check_crossing_point_curvature = true;
     if (!extract_height_ridges(crossing_curvature_field, curvature_bounds, curvature_options).vertices.empty()) {
       throw std::runtime_error("crossing-point curvature threshold was not enforced");
     }
@@ -92,7 +109,8 @@ int main() try {
                                      double minimum_length, std::size_t expected_splits,
                                      bool refine_boundary = false,
                                      LinearitySampling sampling = LinearitySampling::disabled,
-                                     double absolute_tolerance = 1e-3) {
+                                     double absolute_tolerance = 1e-3,
+                                     bool refine_orientation = true) {
     mtet::MTetMesh grid;
     const auto v0 = grid.add_vertex(-1, 0, 0);
     const auto v1 = grid.add_vertex(1, -1, 0);
@@ -107,6 +125,7 @@ int main() try {
     test_options.longest_edge_refinement.max_splits = budget;
     test_options.longest_edge_refinement.minimum_edge_length = minimum_length;
     test_options.longest_edge_refinement.refine_curvature_boundary = refine_boundary;
+    test_options.longest_edge_refinement.refine_orientation_boundary = refine_orientation;
     test_options.longest_edge_refinement.linearity_sampling = sampling;
     test_options.longest_edge_refinement.linearity_absolute_tolerance = absolute_tolerance;
     extract_height_ridges(field, grid, test_options);
@@ -127,6 +146,19 @@ int main() try {
   boundary_crossing_field.gradient = [](const Vec3& p) { return Vec3{-p.x, 0, 0}; };
   verify_split_count(boundary_crossing_field, RefinementPipeline::curvature_orientation, 1, 0, 1);
   verify_split_count(inconsistent_directions_field, RefinementPipeline::curvature_orientation, 1, 0, 1);
+  // Vertex-0 alignment shows no crossing here, but independent pair alignment
+  // detects the crossing on the inconsistent pair. Disabling Boundary I must
+  // still consider that edge instead of silently dropping the tet.
+  verify_split_count(inconsistent_directions_field, RefinementPipeline::curvature_orientation,
+                     1, 0, 1, false, LinearitySampling::disabled, 1e-3, false);
+  DifferentialField3D zero_condition_field = inconsistent_directions_field;
+  zero_condition_field.gradient = [](const Vec3&) { return Vec3{}; };
+  verify_split_count(zero_condition_field, RefinementPipeline::curvature_orientation,
+                     1, 0, 1, false, LinearitySampling::disabled, 1e-3, true);
+  verify_split_count(zero_condition_field, RefinementPipeline::curvature_orientation,
+                     1, 0, 0, false, LinearitySampling::disabled, 1e-3, false);
+  verify_split_count(inconsistent_directions_field, RefinementPipeline::curvature_orientation,
+                     1, 4, 0, false, LinearitySampling::disabled, 1e-3, false);
   for (const auto& field : {curvature_boundary_field, inconsistent_directions_field}) {
     verify_split_count(field, RefinementPipeline::legacy_crossing, 1, 0, 0);
     verify_split_count(field, RefinementPipeline::curvature_orientation, 0, 0, 0);

@@ -29,11 +29,14 @@ struct OutputChoice {
     std::string filename;
     std::string grid_filename;
     bool help = false;
-    double absolute_tolerance = 1e-3;
+    double absolute_tolerance = 0.1;
     ridge_surface::LinearitySampling sampling = ridge_surface::LinearitySampling::cubic_16;
     int max_splits = 100'000;
     double minimum_edge_length = 0.005;
-    ridge_surface::RidgeCurvatureFilter curvature_filter = ridge_surface::RidgeCurvatureFilter::both_endpoints;
+    bool refine_orientation_boundary = false;
+    bool refine_curvature_boundary = false;
+    bool check_crossing_point_curvature = false;
+    ridge_surface::RidgeCurvatureFilter curvature_filter = ridge_surface::RidgeCurvatureFilter::crossing_point;
 };
 
 double nonnegative_number(const std::string& text, const char* option) {
@@ -53,8 +56,11 @@ void print_usage(bool linearity_example) {
               << "  [--triangulation center_fan|vertex_fan|polygons_only]\n"
               << "  [--refinement-pipeline curvature_orientation|legacy_crossing]\n"
               << "  [--ridge-curvature-filter both_endpoints|crossing_point]\n"
-              << "defaults: tolerance=0.001, sampling=cubic_16, max-splits=100000, "
-                 "minimum-edge-length=0.005; Boundary II disabled\n";
+              << "  [--check-crossing-point-curvature]\n"
+              << "  [--enable-boundary-i] [--enable-boundary-ii]\n"
+              << "  [--disable-boundary-i] [--disable-boundary-ii]\n"
+              << "defaults: tolerance=0.1, sampling=cubic_16, max-splits=100000, "
+                 "minimum-edge-length=0.005; Boundary I and II disabled; curvature filter=crossing_point; step 3 disabled\n";
 }
 
 OutputChoice choose_output(int argc, char* argv[], bool linearity_example) {
@@ -68,6 +74,16 @@ OutputChoice choose_output(int argc, char* argv[], bool linearity_example) {
             return choice;
         } else if (argument == "--adaptive") {
             choice.adaptive = true;
+        } else if (argument == "--disable-boundary-i") {
+            choice.refine_orientation_boundary = false;
+        } else if (argument == "--enable-boundary-i") {
+            choice.refine_orientation_boundary = true;
+        } else if (argument == "--disable-boundary-ii") {
+            choice.refine_curvature_boundary = false;
+        } else if (argument == "--enable-boundary-ii") {
+            choice.refine_curvature_boundary = true;
+        } else if (argument == "--check-crossing-point-curvature") {
+            choice.check_crossing_point_curvature = true;
         } else if ((argument == "--le" || argument == "--linearity-absolute-tolerance") && index + 1 < argc) {
             choice.absolute_tolerance = nonnegative_number(argv[++index], "--le");
         } else if (argument == "--minimum-edge-length" && index + 1 < argc) {
@@ -277,8 +293,11 @@ int run_ellipsoid_example(int argc, char* argv[], bool linearity_example) try {
     SurfaceOptions options;
     options.surface_target = RefinementTarget::ridges;
     options.ridge_curvature_filter = choice.curvature_filter;
+    options.check_crossing_point_curvature = choice.check_crossing_point_curvature;
     options.polygon_triangulation = choice.triangulation;
     options.longest_edge_refinement.pipeline = choice.refinement_pipeline;
+    options.longest_edge_refinement.refine_orientation_boundary = choice.refine_orientation_boundary;
+    options.longest_edge_refinement.refine_curvature_boundary = choice.refine_curvature_boundary;
     options.longest_edge_refinement.linearity_absolute_tolerance = choice.absolute_tolerance;
     options.longest_edge_refinement.linearity_relative_tolerance = 0.0;
     options.longest_edge_refinement.linearity_sampling = choice.sampling;
@@ -311,6 +330,8 @@ int run_ellipsoid_example(int argc, char* argv[], bool linearity_example) try {
         std::cout << "actual edge splits: " << grid.get_num_vertices() - initial_vertex_count
                   << " / " << choice.max_splits << "\n"
                   << "linearity absolute tolerance: " << choice.absolute_tolerance
+                  << ", Boundary I: " << (choice.refine_orientation_boundary ? "enabled" : "disabled (edge crossings)")
+                  << ", Boundary II: " << (choice.refine_curvature_boundary ? "enabled" : "disabled")
                   << ", relative tolerance: 0, minimum edge length: " << choice.minimum_edge_length
                   << "\nwrote " << choice.grid_filename << '\n';
     }

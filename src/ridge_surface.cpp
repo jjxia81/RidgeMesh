@@ -159,6 +159,32 @@ bool has_condition_crossing(
     return sign_consistency(values) == 0;
 }
 
+bool has_edge_condition_crossing(
+    std::span<const mtet::VertexId, 4> tet_vertices,
+    const std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id,
+    int direction_index) {
+    // Check all six edges independently. No shared tet orientation is assumed.
+    for (std::size_t first = 0; first < 4; ++first) {
+        const VertexSample& a = samples_by_vertex_id.at(tet_vertices[first].value_of());
+        const Vec3 first_direction = a.eigensystem.vectors[direction_index];
+        const double first_value = dot(a.gradient, first_direction);
+        for (std::size_t second = first + 1; second < 4; ++second) {
+            const VertexSample& b = samples_by_vertex_id.at(tet_vertices[second].value_of());
+            Vec3 second_direction = b.eigensystem.vectors[direction_index];
+            if (dot(first_direction, second_direction) < 0.0) {
+                second_direction = second_direction * -1.0;
+            }
+            const double second_value = dot(b.gradient, second_direction);
+            // Match surfacing's strict sign-change test, excluding zero edges.
+            if ((first_value < 0.0 && second_value > 0.0) ||
+                (first_value > 0.0 && second_value < 0.0)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool should_refine_tet_legacy(
     std::span<const mtet::VertexId, 4> tet_vertices,
     const std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id,
@@ -336,10 +362,17 @@ bool should_refine_tet(
     const auto needs_direction_refinement = [&](int direction_index, bool strong_enough) {
         // Boundary I remains an independent refinement trigger. For orientable
         // tets, linearity is only the final gate on an eligible crossing.
-        if (!tet_directions_are_orientable(tet_vertices, samples_by_vertex_id, direction_index)) {
+        if (options.refine_orientation_boundary &&
+            !tet_directions_are_orientable(tet_vertices, samples_by_vertex_id, direction_index)) {
             return true;
         }
-        if (!strong_enough || !has_condition_crossing(tet_vertices, samples_by_vertex_id, direction_index)) {
+        if (!strong_enough) {
+            return false;
+        }
+        const bool crossing = options.refine_orientation_boundary
+            ? has_condition_crossing(tet_vertices, samples_by_vertex_id, direction_index)
+            : has_edge_condition_crossing(tet_vertices, samples_by_vertex_id, direction_index);
+        if (!crossing) {
             return false;
         }
         if (options.linearity_sampling == LinearitySampling::disabled) {
@@ -776,7 +809,7 @@ SurfaceMesh extract_height_ridges_from_grid(
                       second_sample.gradient, first_sample.eigensystem.vectors[direction_index],
                       second_sample.eigensystem.vectors[direction_index], crossing_point);
             if (!found_crossing) return false;
-            if (is_ridge && check_ridge_at_crossing) {
+            if (is_ridge && check_ridge_at_crossing && options.check_crossing_point_curvature) {
                 Mat3 negated_hessian = field.hessian(crossing_point);
                 for (auto& row : negated_hessian) {
                     for (double& value : row) value = -value;

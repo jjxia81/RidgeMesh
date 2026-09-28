@@ -65,7 +65,7 @@ enum class LinearitySampling {
 
 enum class RidgeCurvatureFilter {
   both_endpoints, // require k1+k3 > threshold at both endpoints (original)
-  crossing_point, // either endpoint k1+k2 > 0, then k1+k3 > threshold at root
+  crossing_point, // either endpoint k1+k2 > 0; optional curvature check at root
 };
 
 // Adaptive, conforming longest-edge bisection of the initial TET6 grid.
@@ -78,8 +78,9 @@ struct LongestEdgeRefinementOptions {
   RefinementPipeline pipeline = RefinementPipeline::curvature_orientation;
   double curvature_zero_tolerance = 1e-12; // new pipeline's Boundary II uncertainty band
   bool refine_curvature_boundary = false; // optional Boundary II trigger; new pipeline only
+  bool refine_orientation_boundary = false; // false: skip Boundary I and use edge-local crossings
   LinearitySampling linearity_sampling = LinearitySampling::cubic_16;
-  double linearity_absolute_tolerance = 1e-3;
+  double linearity_absolute_tolerance = 0.1;
   double linearity_relative_tolerance = 0.0;
 };
 
@@ -104,10 +105,11 @@ struct SurfaceOptions {
   int root_iterations = 4;
   double root_tolerance = 1e-7;
   // For a ridge, k1 + k3 is computed from the eigenvalues of -H. Require it
-  // to exceed this value at both endpoints of every emitted crossing edge.
-  // A zero threshold preserves the notebook's original sign-only test.
+  // to exceed this value at the crossing point by default, or at both edge
+  // endpoints with the original filter. Zero is a sign-only threshold.
   double minimum_curvature_sum = 0.0;
-  RidgeCurvatureFilter ridge_curvature_filter = RidgeCurvatureFilter::both_endpoints;
+  RidgeCurvatureFilter ridge_curvature_filter = RidgeCurvatureFilter::crossing_point;
+  bool check_crossing_point_curvature = false; // optional step 3; crossing_point mode only
   // If finite, a ridge crossing must have f(x) >= this value. This removes
   // local but low-valued ridges when extracting a particular level surface.
   // The default disables the gate.
