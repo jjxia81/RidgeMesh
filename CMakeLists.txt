@@ -32,10 +32,18 @@ target_link_libraries(ridge_example PRIVATE ridge_surface)
 add_executable(ellipsoid_example examples/ellipsoid.cpp)
 target_link_libraries(ellipsoid_example PRIVATE ridge_surface)
 
+add_executable(ellipsoid_linearity_example examples/ellipsoid_linearity.cpp examples/ellipsoid.cpp)
+target_compile_definitions(ellipsoid_linearity_example PRIVATE RIDGE_ELLIPSOID_NO_MAIN)
+target_link_libraries(ellipsoid_linearity_example PRIVATE ridge_surface)
+
 enable_testing()
 add_executable(ridge_test tests/smoke_test.cpp)
 target_link_libraries(ridge_test PRIVATE ridge_surface)
 add_test(NAME ridge_smoke COMMAND ridge_test)
+add_test(NAME ellipsoid_linearity_help COMMAND ellipsoid_linearity_example --help)
+add_test(NAME ellipsoid_linearity_invalid_tolerance
+  COMMAND ellipsoid_linearity_example --le -1)
+set_tests_properties(ellipsoid_linearity_invalid_tolerance PROPERTIES WILL_FAIL TRUE)
 
 if(RIDGE_SURFACE_BUILD_PYTHON)
   pybind11_add_module(ridge_surface_python python/bindings.cpp)
@@ -74,7 +82,7 @@ if(RIDGE_SURFACE_BUILD_PYTHON)
 endif()
 
 if(WIN32)
-  set(ridge_runtime_targets ridge_example ridge_test)
+  set(ridge_runtime_targets ridge_example ridge_test ellipsoid_example ellipsoid_linearity_example)
   if(RIDGE_SURFACE_BUILD_PYTHON)
     list(APPEND ridge_runtime_targets ridge_surface_python)
   endif()

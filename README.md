@@ -192,13 +192,105 @@ opt.surface_target = RefinementTarget::ridges; // omit unrelated valley sheets
 SurfaceMesh result = extract_height_ridges(f, bounds, opt);
 ```
 
-The refinement criterion mirrors `refineLongestEdge` in the notebook. For
-each tet, it aligns the selected Hessian eigenvectors, tests whether
-`gradient dot eigenvector` has mixed signs at its four vertices, and applies
-the convex/concave classification to select ridges, valleys, or both. The
-eligible tet with the longest edge is selected next. `MTetMesh::split_edge()`
+The default `RefinementPipeline::curvature_orientation` follows the ridge-only
+flowchart with a sampled directional-condition linearity check. For each tet:
+
+1. Compute `s = k1 + k3` from the eigenvalues of `-H` at all four vertices.
+   Boundary II is disabled by default (`refine_curvature_boundary = false`).
+   Mixed signs or values within `curvature_zero_tolerance` of zero continue
+   to the orientation/crossing checks, rather than automatically refining.
+   Set `refine_curvature_boundary = true` to restore that automatic trigger.
+2. Apply ridge/valley curvature eligibility. All negative vertex curvature sums
+   reject a ridge tet (valley mode mirrors this). Mixed-curvature tets continue.
+3. Align the selected eigenvectors to vertex 0 and check all remaining
+   pairwise dot products. Any negative pair triggers orientation-boundary
+   refinement (Boundary I), even without a crossing.
+4. Require an oriented `c = gradient dot eigenvector` crossing and sufficient
+   curvature strength. A tet failing this gate makes no linearity sample queries.
+5. As the final eligibility test, compare re-evaluated c at additional barycentric
+   locations with `sum_i weight_i*c(vertex_i)`. Refine if the maximum absolute
+   difference exceeds `linearity_absolute_tolerance + linearity_relative_tolerance
+   * max_abs_c` (scale includes the vertex and additional sampled values).
+   The default is `LinearitySampling::cubic_16`: twelve edge samples at 1/3 and
+   2/3 plus four face centers, with absolute tolerance `1e-3` and relative
+   tolerance `0`. This mode has no tet-center sample. The cheaper alternative,
+   `LinearitySampling::face_centers_5`, uses four face centers and the tet center.
+   Eigenvectors at all sample locations are aligned to the vertex-0 reference.
+   No derivative of c or Bezier-coefficient construction is required.
+   Sufficiently linear crossings stop refining; nonlinearity alone does not
+   trigger subdivision. Boundary I (and optional Boundary II) remain independent
+   refinement triggers before this final test.
+
+Set `linearity_sampling = LinearitySampling::disabled` to restore refinement
+   based on directional crossings and curvature strength. In that mode, all
+   negative vertex curvature sums reject a ridge tet (valley mode mirrors this).
+   For mixed-curvature tets, at least one vertex must exceed the ridge threshold
+   (or its sign-mirrored valley threshold); final extraction still checks both
+   endpoints of each emitted edge crossing. Uniform-sign tets require all four.
+   With sampling enabled, sufficiently linear crossing tets stop refining;
+   nonlinear tets without an observed vertex crossing are not refined. Final
+   mesh extraction still applies the curvature and crossing conditions.
+
+Python selection:
+
+```python
+refine.linearity_sampling = rs.LinearitySampling.cubic_16  # default
+refine.linearity_sampling = rs.LinearitySampling.face_centers_5  # cheaper alternative
+refine.linearity_absolute_tolerance = 1e-3
+refine.linearity_relative_tolerance = 0.0
+```
+
+The separate `ellipsoid_linearity_example` starts from an adaptive 4x4x4 grid
+and lets you control the absolute tolerance from the command line:
+
+```powershell
+.\vs2022\Release\ellipsoid_linearity_example.exe --le 0.01
+```
+
+On Ubuntu build the same CMake target and run
+`./build/ellipsoid_linearity_example --le 0.01`.
+The original `--linearity-absolute-tolerance` spelling remains accepted as an alias.
+To relax endpoint filtering during **surfacing only**, select
+`--ridge-curvature-filter crossing_point`. Either endpoint must satisfy
+`k1+k2 > 0` before testing the oriented directional crossing; the Hessian is
+then re-evaluated at that crossing and `k1+k3 > minimum_curvature_sum` must hold.
+The original `both_endpoints` filter remains the default. This changes neither
+adaptive eligibility nor valley filtering and does not guarantee watertightness.
+The crossing-point example mesh gets a `_crossing_point` suffix for comparison.
+In Python set `options.ridge_curvature_filter = rs.RidgeCurvatureFilter.crossing_point`;
+in C++ use `RidgeCurvatureFilter::crossing_point`.
+Use `--linearity-sampling face_centers_5` for the cheaper test, `--max-splits`
+and `--minimum-edge-length` for the stopping limits, and `--help` for all options.
+Defaults remain 100000 splits, a 0.005 edge cutoff, and `cubic_16` sampling;
+relative tolerance is zero. This example writes `ellipsoid_linearity_ridge.ply`
+and `ellipsoid_linearity_grid_wireframe.ply` in the current directory, separate
+from the original example's output names. Each rerun replaces these files.
+
+The public C++/Python functions `directional_linearity_error_16` and
+`directional_linearity_error_5` return the maximum difference for a supplied tet.
+
+Set `opt.longest_edge_refinement.pipeline = RefinementPipeline::legacy_crossing`
+to retain the previous curvature-classification plus crossing criterion.
+In Python use `refine.pipeline = rs.RefinementPipeline.legacy_crossing`;
+`rs.RefinementPipeline.curvature_orientation` selects the new default.
+These choices do not enable adaptation by themselves: set `target` and
+`max_splits` as above. Uniform extraction is unchanged.
+
+Both pipelines obey `max_splits`, counting actual MTet edge-split operations
+(one split can replace multiple incident tets), and `minimum_edge_length`:
+a candidate is discarded when its **longest edge** is at or below this length.
+This is a refinement cutoff, not a guarantee that every child edge has that
+minimum length. Coarse vertex-only tests can still miss an interior crossing;
+refinement does not guarantee a closed surface when the budget is exhausted.
+
+The eligible tet with the longest edge is selected next. Candidates are kept in a
+descending-length queue indexed by tetrahedron ID. After a split, candidates
+for the replaced edge-ring tetrahedra are removed, and only eligible new
+tetrahedra are inserted; the whole grid is not rescanned. `MTetMesh::split_edge()`
 splits the full incident-edge ring, so the mesh remains conforming; derivatives
-are evaluated only for the midpoint vertex created by that split.
+are cached at grid vertices; sampled linearity additionally re-evaluates
+derivatives at the 16 or 5 test locations for each checked tet. These probes
+are not inserted as grid vertices. The legacy pipeline ignores linearity settings.
 
 If you already have an MTet coarse grid, pass it by reference instead. It is
 the same grid that is refined and surfaced—there is no copied vertex or tet
@@ -253,8 +345,9 @@ normal direction or shift the bounds slightly. Zero-valued whole edges are
 deliberately ignored because they have no unique dual-cell topology.
 
 The `ridge_example` program compares a uniform `64 x 64 x 64` TET6 grid with
-an adaptive `4 x 4 x 4` MTet grid using up to 5,000 longest-edge splits and a
-0.005 minimum edge length. It writes three ASCII PLY files in its
+an adaptive `4 x 4 x 4` MTet grid using up to 100,000 longest-edge splits and a
+0.005 minimum selected-edge length. This high split cap can take substantial
+time and memory. It writes three ASCII PLY files in its
 working directory: `uniform_64_sphere.ply` is the dense uniform-grid ridge;
 `ridge_example.ply` is the adaptive-grid ridge; and
 `adaptive_grid_wireframe.ply` contains the final adaptive MTet vertex/edge
@@ -264,16 +357,27 @@ wireframe.
 \(F(x) = -(x^2/a^2 + y^2/b^2 + z^2/c^2 - 1)^2\). It writes
 `ellipsoid_ridge.ply`, a uniform-grid ridge mesh for a flattened sphere
 with semi-axes \(a=b=0.75\) and \(c=0.25\). It uses the default center-fan
-triangulation and writes only this one mesh. Set
+triangulation. Run `ellipsoid_example --adaptive` to start instead from a
+`4 x 4 x 4` MTet grid and apply up to 100,000 longest-edge splits around the
+ridge. That run writes `ellipsoid_adaptive_ridge.ply` and
+`ellipsoid_adaptive_grid_wireframe.ply`; the latter shows the refined grid edges.
+Set
 `SurfaceOptions::retain_dual_polygons` to access the ordered dual-vertex rings
 from the C++ API; the option is disabled by default to avoid storing them for
 large neural fields.
 
 The example also accepts `--triangulation vertex_fan` or
-`--triangulation polygons_only`. Each invocation still writes just one PLY:
-`ellipsoid_ridge_vertex_fan.ply` or `ellipsoid_ridge_polygons.ply`, respectively.
+`--triangulation polygons_only`, with or without `--adaptive`. Each invocation
+writes one ridge-mesh PLY, adding `_vertex_fan` or `_polygons` to its filename
+for these alternate modes. The adaptive run additionally writes its grid
+wireframe PLY.
 
 `SurfaceOptions::polygon_triangulation` selects one of three face outputs:
+
+Polygon boundaries follow MTet's cyclic tetrahedron adjacency around each
+crossing edge, not geometric angle sorting of the dual vertices. This preserves
+shared polygon edges on irregular adaptive grids. The arithmetic-mean center
+is used only for center-fan triangulation; it does not determine connectivity.
 
 - `PolygonTriangulation::center_fan` (default): add the arithmetic mean of
   each polygon's dual vertices and connect it to every boundary edge.

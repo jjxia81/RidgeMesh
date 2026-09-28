@@ -98,11 +98,30 @@ PYBIND11_MODULE(ridge_surface, module) {
         .value("vertex_fan", PolygonTriangulation::vertex_fan)
         .value("polygons_only", PolygonTriangulation::polygons_only);
 
+    py::enum_<RefinementPipeline>(module, "RefinementPipeline")
+        .value("curvature_orientation", RefinementPipeline::curvature_orientation)
+        .value("legacy_crossing", RefinementPipeline::legacy_crossing);
+
+    py::enum_<LinearitySampling>(module, "LinearitySampling")
+        .value("cubic_16", LinearitySampling::cubic_16)
+        .value("face_centers_5", LinearitySampling::face_centers_5)
+        .value("disabled", LinearitySampling::disabled);
+
+    py::enum_<RidgeCurvatureFilter>(module, "RidgeCurvatureFilter")
+        .value("both_endpoints", RidgeCurvatureFilter::both_endpoints)
+        .value("crossing_point", RidgeCurvatureFilter::crossing_point);
+
     py::class_<LongestEdgeRefinementOptions>(module, "LongestEdgeRefinementOptions")
         .def(py::init<>())
         .def_readwrite("target", &LongestEdgeRefinementOptions::target)
         .def_readwrite("max_splits", &LongestEdgeRefinementOptions::max_splits)
-        .def_readwrite("minimum_edge_length", &LongestEdgeRefinementOptions::minimum_edge_length);
+        .def_readwrite("minimum_edge_length", &LongestEdgeRefinementOptions::minimum_edge_length)
+        .def_readwrite("pipeline", &LongestEdgeRefinementOptions::pipeline)
+        .def_readwrite("curvature_zero_tolerance", &LongestEdgeRefinementOptions::curvature_zero_tolerance)
+        .def_readwrite("refine_curvature_boundary", &LongestEdgeRefinementOptions::refine_curvature_boundary)
+        .def_readwrite("linearity_sampling", &LongestEdgeRefinementOptions::linearity_sampling)
+        .def_readwrite("linearity_absolute_tolerance", &LongestEdgeRefinementOptions::linearity_absolute_tolerance)
+        .def_readwrite("linearity_relative_tolerance", &LongestEdgeRefinementOptions::linearity_relative_tolerance);
 
     py::class_<SurfaceOptions>(module, "SurfaceOptions")
         .def(py::init<>())
@@ -115,6 +134,7 @@ PYBIND11_MODULE(ridge_surface, module) {
         .def_readwrite("root_iterations", &SurfaceOptions::root_iterations)
         .def_readwrite("root_tolerance", &SurfaceOptions::root_tolerance)
         .def_readwrite("minimum_curvature_sum", &SurfaceOptions::minimum_curvature_sum)
+        .def_readwrite("ridge_curvature_filter", &SurfaceOptions::ridge_curvature_filter)
         .def_readwrite("minimum_ridge_field_value", &SurfaceOptions::minimum_ridge_field_value)
         .def_readwrite("finite_difference_step", &SurfaceOptions::finite_difference_step)
         .def_readwrite("retain_dual_polygons", &SurfaceOptions::retain_dual_polygons)
@@ -141,6 +161,24 @@ PYBIND11_MODULE(ridge_surface, module) {
         py::arg("bounds"),
         py::arg("options") = SurfaceOptions{},
         "Extract ridges/valleys from f(x, y, z); derivatives use finite differences.");
+    for (const bool use_sixteen : {true, false}) {
+        module.def(use_sixteen ? "directional_linearity_error_16" : "directional_linearity_error_5",
+            [use_sixteen](const py::function& gradient, const py::function& hessian,
+                          const std::array<Vec3, 4>& vertices, int direction_index) {
+                DifferentialField3D field;
+                field.gradient = [gradient](const Vec3& p) {
+                    py::gil_scoped_acquire acquire;
+                    return as_vec3(gradient(p.x, p.y, p.z));
+                };
+                field.hessian = [hessian](const Vec3& p) {
+                    py::gil_scoped_acquire acquire;
+                    return as_mat3(hessian(p.x, p.y, p.z));
+                };
+                return use_sixteen ? directional_linearity_error_16(field, vertices, direction_index)
+                                   : directional_linearity_error_5(field, vertices, direction_index);
+            }, py::arg("gradient"), py::arg("hessian"), py::arg("vertices"),
+               py::arg("direction_index") = 0);
+    }
     module.def(
         "extract_height_ridges_from_derivatives",
         &extract_from_derivatives,

@@ -126,7 +126,7 @@ int main() {
     SurfaceOptions adaptive_options;
     adaptive_options.surface_target = RefinementTarget::ridges;
     adaptive_options.longest_edge_refinement.target = RefinementTarget::ridges;
-    adaptive_options.longest_edge_refinement.max_splits = 5000;
+    adaptive_options.longest_edge_refinement.max_splits = 100'000;
     adaptive_options.longest_edge_refinement.minimum_edge_length = 0.005;
 
     const auto adaptive_start = std::chrono::steady_clock::now();

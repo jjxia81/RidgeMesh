@@ -52,14 +52,46 @@ enum class PolygonTriangulation {
   polygons_only, // keep dual polygons without making triangle or center vertices
 };
 
+enum class RefinementPipeline {
+  curvature_orientation, // curvature boundary, tet orientability, then crossing
+  legacy_crossing,       // previous curvature classification + crossing test
+};
+
+enum class LinearitySampling {
+  cubic_16,       // twelve 1/3 and 2/3 edge locations + four face centers
+  face_centers_5, // four face centers + tetrahedron center
+  disabled,      // restore crossing-driven refinement without a linearity test
+};
+
+enum class RidgeCurvatureFilter {
+  both_endpoints, // require k1+k3 > threshold at both endpoints (original)
+  crossing_point, // either endpoint k1+k2 > 0, then k1+k3 > threshold at root
+};
+
 // Adaptive, conforming longest-edge bisection of the initial TET6 grid.
-// A zero minimum_edge_length matches the notebook: every tetrahedron that can
-// contain the selected ridge/valley condition is eligible until max_splits.
+// Stop when the candidate's longest edge is <= minimum_edge_length or when
+// max_splits edge bisections have occurred. Zero disables the length cutoff.
 struct LongestEdgeRefinementOptions {
   RefinementTarget target = RefinementTarget::none;
   int max_splits = 0;
   double minimum_edge_length = 0.0;
+  RefinementPipeline pipeline = RefinementPipeline::curvature_orientation;
+  double curvature_zero_tolerance = 1e-12; // new pipeline's Boundary II uncertainty band
+  bool refine_curvature_boundary = false; // optional Boundary II trigger; new pipeline only
+  LinearitySampling linearity_sampling = LinearitySampling::cubic_16;
+  double linearity_absolute_tolerance = 1e-3;
+  double linearity_relative_tolerance = 0.0;
 };
+
+// Maximum |c(sample) - sum_i weight_i*c(vertex_i)|, where c = gradient dot
+// the consistently oriented eigenvector of -H. direction_index 0 selects k1,
+// 2 selects k3. These functions re-evaluate derivatives, not gradients of c.
+double directional_linearity_error_16(const DifferentialField3D& field,
+                                     const std::array<Vec3, 4>& tet_vertices,
+                                     int direction_index = 0);
+double directional_linearity_error_5(const DifferentialField3D& field,
+                                    const std::array<Vec3, 4>& tet_vertices,
+                                    int direction_index = 0);
 
 struct SurfaceOptions {
   int nx = 32, ny = 32, nz = 32;       // cells along x/y/z
@@ -75,6 +107,7 @@ struct SurfaceOptions {
   // to exceed this value at both endpoints of every emitted crossing edge.
   // A zero threshold preserves the notebook's original sign-only test.
   double minimum_curvature_sum = 0.0;
+  RidgeCurvatureFilter ridge_curvature_filter = RidgeCurvatureFilter::both_endpoints;
   // If finite, a ridge crossing must have f(x) >= this value. This removes
   // local but low-valued ridges when extracting a particular level surface.
   // The default disables the gate.

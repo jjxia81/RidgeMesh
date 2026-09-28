@@ -9,9 +9,11 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <unordered_map>
+#include <vector>
 
 namespace ridge_surface {
 namespace {
@@ -28,6 +30,7 @@ struct GridEdge {
     mtet::VertexId first_vertex;
     mtet::VertexId second_vertex;
     std::vector<std::size_t> incident_tets;
+    mtet::EdgeId mtet_edge;
 };
 
 struct CrossingEdge {
@@ -47,6 +50,15 @@ struct RefinementCandidate {
     mtet::TetId tet_id;
     std::uint8_t longest_local_edge;
     double longest_edge_length;
+};
+
+struct LongestCandidateFirst {
+    bool operator()(const RefinementCandidate& left, const RefinementCandidate& right) const {
+        if (left.longest_edge_length != right.longest_edge_length) {
+            return left.longest_edge_length > right.longest_edge_length;
+        }
+        return left.tet_id.value_of() < right.tet_id.value_of();
+    }
 };
 
 OrderedEigenSystem compute_eigensystem(const Mat3& matrix) {
@@ -147,7 +159,7 @@ bool has_condition_crossing(
     return sign_consistency(values) == 0;
 }
 
-bool should_refine_tet(
+bool should_refine_tet_legacy(
     std::span<const mtet::VertexId, 4> tet_vertices,
     const std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id,
     RefinementTarget target,
@@ -191,38 +203,194 @@ bool should_refine_tet(
     return false;
 }
 
-std::optional<RefinementCandidate> find_longest_refinement_candidate(
-    const mtet::MTetMesh& mesh,
+bool tet_directions_are_orientable(
+    std::span<const mtet::VertexId, 4> tet_vertices,
     const std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id,
-    RefinementTarget target,
+    int direction_index) {
+    std::array<Vec3, 4> directions;
+    for (std::size_t index = 0; index < directions.size(); ++index) {
+        directions[index] = samples_by_vertex_id.at(tet_vertices[index].value_of())
+                                .eigensystem.vectors[direction_index];
+        if (index > 0 && dot(directions[0], directions[index]) < 0.0) {
+            directions[index] = directions[index] * -1.0;
+        }
+    }
+    // Matching every direction to vertex 0 alone is insufficient: the other
+    // three must also agree with one another. Do not mutate cached samples.
+    return dot(directions[1], directions[2]) >= 0.0 &&
+           dot(directions[1], directions[3]) >= 0.0 &&
+           dot(directions[2], directions[3]) >= 0.0;
+}
+
+struct LinearityError {
+    double maximum_difference = 0.0;
+    double maximum_absolute_value = 0.0;
+};
+
+LinearityError evaluate_directional_linearity(
+    const DifferentialField3D& field,
+    const std::array<Vec3, 4>& positions,
+    const std::array<const VertexSample*, 4>& vertex_samples,
+    int direction_index,
+    LinearitySampling sampling) {
+    const Vec3 reference = vertex_samples[0]->eigensystem.vectors[direction_index];
+    const auto condition_value = [&](const VertexSample& sample) {
+        Vec3 direction = sample.eigensystem.vectors[direction_index];
+        if (dot(direction, reference) < 0.0) {
+            direction = direction * -1.0;
+        }
+        return dot(sample.gradient, direction);
+    };
+    LinearityError result;
+    std::array<double, 4> vertex_values;
+    for (std::size_t index = 0; index < 4; ++index) {
+        vertex_values[index] = condition_value(*vertex_samples[index]);
+        result.maximum_absolute_value = std::max(
+            result.maximum_absolute_value, std::abs(vertex_values[index]));
+    }
+    const auto compare_sample = [&](const std::array<double, 4>& weights) {
+        Vec3 position{};
+        double linear_value = 0.0;
+        for (std::size_t index = 0; index < 4; ++index) {
+            position += positions[index] * weights[index];
+            linear_value += vertex_values[index] * weights[index];
+        }
+        const double actual_value = condition_value(evaluate_vertex_sample(field, position));
+        if (!std::isfinite(actual_value) || !std::isfinite(linear_value)) {
+            throw std::runtime_error("non-finite directional linearity sample");
+        }
+        result.maximum_difference = std::max(
+            result.maximum_difference, std::abs(actual_value - linear_value));
+        result.maximum_absolute_value = std::max(
+            result.maximum_absolute_value, std::abs(actual_value));
+    };
+
+    if (sampling == LinearitySampling::cubic_16) {
+        // The twelve ordered vertex pairs are the two cubic locations per edge.
+        for (std::size_t first = 0; first < 4; ++first) {
+            for (std::size_t second = 0; second < 4; ++second) {
+                if (first == second) continue;
+                std::array<double, 4> weights{};
+                weights[first] = 2.0 / 3.0;
+                weights[second] = 1.0 / 3.0;
+                compare_sample(weights);
+            }
+        }
+    }
+    for (std::size_t opposite_vertex = 0; opposite_vertex < 4; ++opposite_vertex) {
+        std::array<double, 4> weights{1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0};
+        weights[opposite_vertex] = 0.0;
+        compare_sample(weights);
+    }
+    if (sampling == LinearitySampling::face_centers_5) {
+        compare_sample({.25, .25, .25, .25});
+    }
+    return result;
+}
+
+bool should_refine_tet(
+    const mtet::MTetMesh& mesh,
+    const DifferentialField3D& field,
+    std::span<const mtet::VertexId, 4> tet_vertices,
+    const std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id,
+    const LongestEdgeRefinementOptions& options,
+    double minimum_curvature_sum) {
+    if (options.pipeline == RefinementPipeline::legacy_crossing) {
+        return should_refine_tet_legacy(
+            tet_vertices, samples_by_vertex_id, options.target, minimum_curvature_sum);
+    }
+    if (options.target == RefinementTarget::none) {
+        return false;
+    }
+
+    bool all_positive = true;
+    bool all_negative = true;
+    bool ridge_is_strong = true;
+    bool valley_is_strong = true;
+    bool any_ridge_is_strong = false;
+    bool any_valley_is_strong = false;
+    for (const mtet::VertexId vertex_id : tet_vertices) {
+        const double sum = samples_by_vertex_id.at(vertex_id.value_of()).curvature_sum;
+        all_positive = all_positive && sum > options.curvature_zero_tolerance;
+        all_negative = all_negative && sum < -options.curvature_zero_tolerance;
+        ridge_is_strong = ridge_is_strong && sum > minimum_curvature_sum;
+        valley_is_strong = valley_is_strong && sum < -minimum_curvature_sum;
+        any_ridge_is_strong = any_ridge_is_strong ||
+            sum > std::max(minimum_curvature_sum, options.curvature_zero_tolerance);
+        any_valley_is_strong = any_valley_is_strong ||
+            sum < -std::max(minimum_curvature_sum, options.curvature_zero_tolerance);
+    }
+
+    // Boundary II: mixed signs or an uncertain near-zero vertex. This is
+    // independent of the directional crossing and the extraction threshold.
+    const bool curvature_boundary = !all_positive && !all_negative;
+    if (options.refine_curvature_boundary && curvature_boundary) {
+        return true;
+    }
+
+    const bool wants_ridges = options.target == RefinementTarget::ridges ||
+                              options.target == RefinementTarget::ridges_and_valleys;
+    const bool wants_valleys = options.target == RefinementTarget::valleys ||
+                               options.target == RefinementTarget::ridges_and_valleys;
+
+    const auto needs_direction_refinement = [&](int direction_index, bool strong_enough) {
+        // Boundary I remains an independent refinement trigger. For orientable
+        // tets, linearity is only the final gate on an eligible crossing.
+        if (!tet_directions_are_orientable(tet_vertices, samples_by_vertex_id, direction_index)) {
+            return true;
+        }
+        if (!strong_enough || !has_condition_crossing(tet_vertices, samples_by_vertex_id, direction_index)) {
+            return false;
+        }
+        if (options.linearity_sampling == LinearitySampling::disabled) {
+            return true;
+        }
+
+        std::array<Vec3, 4> positions;
+        std::array<const VertexSample*, 4> samples;
+        for (std::size_t index = 0; index < 4; ++index) {
+            positions[index] = position_of(mesh, tet_vertices[index]);
+            samples[index] = &samples_by_vertex_id.at(tet_vertices[index].value_of());
+        }
+        const LinearityError error = evaluate_directional_linearity(
+            field, positions, samples, direction_index, options.linearity_sampling);
+        const double tolerance = options.linearity_absolute_tolerance +
+            options.linearity_relative_tolerance * error.maximum_absolute_value;
+        return error.maximum_difference > tolerance;
+    };
+    return (wants_ridges && !all_negative && needs_direction_refinement(
+                0, curvature_boundary ? any_ridge_is_strong : ridge_is_strong)) ||
+           (wants_valleys && !all_positive && needs_direction_refinement(
+                2, curvature_boundary ? any_valley_is_strong : valley_is_strong));
+}
+
+std::optional<RefinementCandidate> make_refinement_candidate(
+    const mtet::MTetMesh& mesh,
+    const DifferentialField3D& field,
+    mtet::TetId tet_id,
+    const std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id,
+    const LongestEdgeRefinementOptions& options,
     double minimum_curvature_sum) {
     constexpr std::array<std::array<int, 2>, 6> kLocalEdges{{
         {{0, 1}}, {{1, 2}}, {{2, 0}}, {{0, 3}}, {{1, 3}}, {{2, 3}},
     }};
-    std::optional<RefinementCandidate> best_candidate;
-
-    mesh.seq_foreach_tet([&](mtet::TetId tet_id, auto tet_vertices) {
-        if (!should_refine_tet(tet_vertices, samples_by_vertex_id, target, minimum_curvature_sum)) {
-            return;
+    const auto tet_vertices = mesh.get_tet(tet_id);
+    RefinementCandidate candidate{tet_id, 0, -1.0};
+    for (std::uint8_t edge_index = 0; edge_index < kLocalEdges.size(); ++edge_index) {
+        const auto [first_index, second_index] = kLocalEdges[edge_index];
+        const double edge_length = norm(
+            position_of(mesh, tet_vertices[first_index]) - position_of(mesh, tet_vertices[second_index]));
+        if (edge_length > candidate.longest_edge_length) {
+            candidate.longest_edge_length = edge_length;
+            candidate.longest_local_edge = edge_index;
         }
-
-        std::uint8_t longest_local_edge = 0;
-        double longest_edge_length = -1.0;
-        for (std::uint8_t edge_index = 0; edge_index < kLocalEdges.size(); ++edge_index) {
-            const auto [first_index, second_index] = kLocalEdges[edge_index];
-            const double edge_length = norm(
-                position_of(mesh, tet_vertices[first_index]) - position_of(mesh, tet_vertices[second_index]));
-            if (edge_length > longest_edge_length) {
-                longest_edge_length = edge_length;
-                longest_local_edge = edge_index;
-            }
-        }
-
-        if (!best_candidate || longest_edge_length > best_candidate->longest_edge_length) {
-            best_candidate = {tet_id, longest_local_edge, longest_edge_length};
-        }
-    });
-    return best_candidate;
+    }
+    // Avoid all additional derivative queries for already-small tetrahedra.
+    if (candidate.longest_edge_length <= options.minimum_edge_length ||
+        !should_refine_tet(mesh, field, tet_vertices, samples_by_vertex_id, options, minimum_curvature_sum)) {
+        return std::nullopt;
+    }
+    return candidate;
 }
 
 int refine_longest_edges_in_place(
@@ -235,47 +403,101 @@ int refine_longest_edges_in_place(
         return 0;
     }
 
-    int split_count = 0;
-    while (split_count < options.max_splits) {
-        const auto candidate =
-            find_longest_refinement_candidate(
-                mesh, samples_by_vertex_id, options.target, minimum_curvature_sum);
+    // The ordered set is a max-priority queue with efficient removal by tet ID.
+    // A split replaces only the tets around its edge, so all other candidates
+    // remain valid and never need to be scanned again.
+    using CandidateQueue = std::set<RefinementCandidate, LongestCandidateFirst>;
+    CandidateQueue candidates;
+    std::unordered_map<std::uint64_t, CandidateQueue::iterator> candidate_by_tet;
+
+    // MTet's edge-ring traversal may return tagged tetrahedron handles.
+    // Strip the tag before using a handle as a queue identity.
+    const auto canonical_tet = [&](mtet::TetId tet_id) {
+        return mesh.get_edge_tet(mesh.get_edge(tet_id, 0));
+    };
+
+    const auto enqueue_if_eligible = [&](mtet::TetId tet_id) {
+        tet_id = canonical_tet(tet_id);
+        if (candidate_by_tet.contains(tet_id.value_of())) {
+            return;
+        }
+        const auto candidate = make_refinement_candidate(
+            mesh, field, tet_id, samples_by_vertex_id, options, minimum_curvature_sum);
         if (!candidate || candidate->longest_edge_length <= options.minimum_edge_length) {
-            break;
+            return;
+        }
+        const auto [iterator, inserted] = candidates.insert(*candidate);
+        if (inserted) {
+            candidate_by_tet.emplace(tet_id.value_of(), iterator);
+        }
+    };
+
+    const auto remove_candidate = [&](mtet::TetId tet_id) {
+        tet_id = canonical_tet(tet_id);
+        const auto entry = candidate_by_tet.find(tet_id.value_of());
+        if (entry != candidate_by_tet.end()) {
+            candidates.erase(entry->second);
+            candidate_by_tet.erase(entry);
+        }
+    };
+
+    mesh.seq_foreach_tet([&](mtet::TetId tet_id, auto) {
+        enqueue_if_eligible(tet_id);
+    });
+
+    int split_count = 0;
+    while (split_count < options.max_splits && !candidates.empty()) {
+        const RefinementCandidate candidate = *candidates.begin();
+        const mtet::EdgeId edge_id = mesh.get_edge(candidate.tet_id, candidate.longest_local_edge);
+
+        std::vector<mtet::TetId> replaced_tets;
+        mesh.foreach_tet_around_edge(edge_id, [&](mtet::TetId tet_id) {
+            replaced_tets.push_back(tet_id);
+        });
+        for (const mtet::TetId tet_id : replaced_tets) {
+            remove_candidate(tet_id);
         }
 
-        const mtet::EdgeId edge_id = mesh.get_edge(candidate->tet_id, candidate->longest_local_edge);
         const auto [new_vertex_id, first_half_edge, second_half_edge] = mesh.split_edge(edge_id);
-        (void)first_half_edge;
-        (void)second_half_edge;
         add_vertex_sample(mesh, field, new_vertex_id, samples_by_vertex_id);
+
+        mesh.foreach_tet_around_edge(first_half_edge, enqueue_if_eligible);
+        mesh.foreach_tet_around_edge(second_half_edge, enqueue_if_eligible);
         ++split_count;
     }
     return split_count;
 }
 
 // Build the compact edge -> incident-tetrahedra table needed for dual surfacing.
-std::vector<GridEdge> build_edge_adjacency(const mtet::MTetMesh& mesh) {
+std::vector<GridEdge> build_edge_adjacency(mtet::MTetMesh& mesh) {
     std::map<std::pair<std::uint64_t, std::uint64_t>, std::size_t> edge_index_by_vertices;
+    std::unordered_map<std::uint64_t, std::size_t> tet_index_by_id;
     std::vector<GridEdge> edges;
 
     std::size_t tet_index = 0;
-    mesh.seq_foreach_tet([&](mtet::TetId, auto tet_ids) {
-        for (int first = 0; first < 4; ++first) {
-            for (int second = first + 1; second < 4; ++second) {
-                const auto key = std::minmax(
-                    tet_ids[first].value_of(),
-                    tet_ids[second].value_of());
-                const auto [iterator, inserted] = edge_index_by_vertices.emplace(key, edges.size());
-                if (inserted) {
-                    edges.push_back({tet_ids[first], tet_ids[second], {tet_index}});
-                } else {
-                    edges[iterator->second].incident_tets.push_back(tet_index);
-                }
+    mesh.seq_foreach_tet([&](mtet::TetId tet_id, auto) {
+        tet_index_by_id.emplace(tet_id.value_of(), tet_index++);
+        mesh.foreach_edge_in_tet(tet_id, [&](mtet::EdgeId edge_id, mtet::VertexId first,
+                                              mtet::VertexId second) {
+            const std::uint64_t first_id = first.value_of();
+            const std::uint64_t second_id = second.value_of();
+            const std::pair<std::uint64_t, std::uint64_t> key{
+                std::min(first_id, second_id), std::max(first_id, second_id)};
+            const auto [iterator, inserted] = edge_index_by_vertices.emplace(key, edges.size());
+            if (inserted) {
+                edges.push_back({first, second, {}, edge_id});
             }
-        }
-        ++tet_index;
+        });
     });
+
+    // Preserve the topological one-ring order. Geometric angle sorting can
+    // change which neighboring tetrahedra share a polygon boundary edge.
+    for (GridEdge& edge : edges) {
+        mesh.foreach_tet_around_edge(edge.mtet_edge, [&](mtet::TetId tet_id) {
+            const mtet::TetId canonical = mesh.get_edge_tet(mesh.get_edge(tet_id, 0));
+            edge.incident_tets.push_back(tet_index_by_id.at(canonical.value_of()));
+        });
+    }
     return edges;
 }
 
@@ -401,13 +623,10 @@ void append_surface_polygons(
             continue;
         }
 
-        // Sort the dual vertices around the crossing edge, then triangulate.
+        // MTet supplies the cyclic order. Only reverse the whole loop to set
+        // its winding; never reorder individual vertices by their positions.
         const Vec3 edge_axis = normalized(
             position_of(grid_mesh, edge.second_vertex) - position_of(grid_mesh, edge.first_vertex));
-        const Vec3 basis_u = normalized(
-            std::abs(edge_axis.x) < 0.8 ? cross(edge_axis, {1, 0, 0})
-                                        : cross(edge_axis, {0, 1, 0}));
-        const Vec3 basis_v = cross(edge_axis, basis_u);
 
         Vec3 center;
         for (const std::size_t vertex_index : ring) {
@@ -415,13 +634,14 @@ void append_surface_polygons(
         }
         center = center / static_cast<double>(ring.size());
 
-        std::sort(ring.begin(), ring.end(), [&](std::size_t left, std::size_t right) {
-            const Vec3 left_offset = surface_vertices[left] - center;
-            const Vec3 right_offset = surface_vertices[right] - center;
-            const double left_angle = std::atan2(dot(left_offset, basis_v), dot(left_offset, basis_u));
-            const double right_angle = std::atan2(dot(right_offset, basis_v), dot(right_offset, basis_u));
-            return left_angle < right_angle;
-        });
+        Vec3 area_vector{};
+        for (std::size_t index = 0; index < ring.size(); ++index) {
+            area_vector += cross(surface_vertices[ring[index]] - center,
+                surface_vertices[ring[(index + 1) % ring.size()]] - center);
+        }
+        if (dot(area_vector, edge_axis) < 0.0) {
+            std::reverse(ring.begin(), ring.end());
+        }
 
         if (output_polygons != nullptr) {
             output_polygons->push_back({ring});
@@ -451,7 +671,35 @@ Vec3 axis_step(int axis, double step) {
     return {0, 0, step};
 }
 
+double standalone_linearity_error(
+    const DifferentialField3D& field, const std::array<Vec3, 4>& positions,
+    int direction_index, LinearitySampling sampling) {
+    if (!field.gradient || !field.hessian || direction_index < 0 || direction_index > 2) {
+        throw std::invalid_argument("linearity test requires derivatives and direction_index in [0,2]");
+    }
+    std::array<VertexSample, 4> samples;
+    std::array<const VertexSample*, 4> sample_pointers;
+    for (std::size_t index = 0; index < 4; ++index) {
+        samples[index] = evaluate_vertex_sample(field, positions[index]);
+        sample_pointers[index] = &samples[index];
+    }
+    return evaluate_directional_linearity(
+        field, positions, sample_pointers, direction_index, sampling).maximum_difference;
+}
+
 } // namespace
+
+double directional_linearity_error_16(
+    const DifferentialField3D& field, const std::array<Vec3, 4>& tet_vertices,
+    int direction_index) {
+    return standalone_linearity_error(field, tet_vertices, direction_index, LinearitySampling::cubic_16);
+}
+
+double directional_linearity_error_5(
+    const DifferentialField3D& field, const std::array<Vec3, 4>& tet_vertices,
+    int direction_index) {
+    return standalone_linearity_error(field, tet_vertices, direction_index, LinearitySampling::face_centers_5);
+}
 
 SurfaceMesh extract_height_ridges_from_grid(
     const DifferentialField3D& field,
@@ -460,7 +708,14 @@ SurfaceMesh extract_height_ridges_from_grid(
     if (!field.gradient || !field.hessian || coarse_grid.get_num_vertices() == 0 ||
         coarse_grid.get_num_tets() == 0 ||
         options.longest_edge_refinement.max_splits < 0 ||
-        options.longest_edge_refinement.minimum_edge_length < 0.0) {
+        options.longest_edge_refinement.minimum_edge_length < 0.0 ||
+        !std::isfinite(options.longest_edge_refinement.minimum_edge_length) ||
+        options.longest_edge_refinement.curvature_zero_tolerance < 0.0 ||
+        !std::isfinite(options.longest_edge_refinement.curvature_zero_tolerance) ||
+        options.longest_edge_refinement.linearity_absolute_tolerance < 0.0 ||
+        !std::isfinite(options.longest_edge_refinement.linearity_absolute_tolerance) ||
+        options.longest_edge_refinement.linearity_relative_tolerance < 0.0 ||
+        !std::isfinite(options.longest_edge_refinement.linearity_relative_tolerance)) {
         throw std::invalid_argument("valid field and non-empty MTet grid required");
     }
     if (std::isfinite(options.minimum_ridge_field_value) && !field.value) {
@@ -494,36 +749,62 @@ SurfaceMesh extract_height_ridges_from_grid(
             options.surface_target == RefinementTarget::ridges_and_valleys;
         const bool extract_valleys = options.surface_target == RefinementTarget::valleys ||
             options.surface_target == RefinementTarget::ridges_and_valleys;
-        const bool ridge = extract_ridges &&
-            first_sample.curvature_sum > options.minimum_curvature_sum &&
-            second_sample.curvature_sum > options.minimum_curvature_sum;
+        const bool check_ridge_at_crossing = options.ridge_curvature_filter == RidgeCurvatureFilter::crossing_point;
+        const auto endpoint_passes_precheck = [](const VertexSample& sample) {
+            return sample.eigensystem.values[0] + sample.eigensystem.values[1] > 0.0;
+        };
+        const bool ridge = extract_ridges && (check_ridge_at_crossing
+            ? endpoint_passes_precheck(first_sample) || endpoint_passes_precheck(second_sample)
+            : first_sample.curvature_sum > options.minimum_curvature_sum &&
+              second_sample.curvature_sum > options.minimum_curvature_sum);
         const bool valley = extract_valleys &&
             first_sample.curvature_sum < -options.minimum_curvature_sum &&
             second_sample.curvature_sum < -options.minimum_curvature_sum;
         if (!ridge && !valley) continue;
 
-        const int label = ridge ? 1 : -1;
-        const int direction_index = ridge ? 0 : 2;
-        Vec3 crossing_point;
-        const bool found_crossing = options.subdivide_roots
-            ? find_refined_crossing(field, position_of(coarse_grid, edge.first_vertex),
-                  position_of(coarse_grid, edge.second_vertex), first_sample.gradient,
-                  second_sample.gradient, first_sample.eigensystem.vectors[direction_index],
-                  second_sample.eigensystem.vectors[direction_index], ridge, options, crossing_point)
-            : find_linear_crossing(position_of(coarse_grid, edge.first_vertex),
-                  position_of(coarse_grid, edge.second_vertex), first_sample.gradient,
-                  second_sample.gradient, first_sample.eigensystem.vectors[direction_index],
-                  second_sample.eigensystem.vectors[direction_index], crossing_point);
-        if (!found_crossing) continue;
-        if (ridge && std::isfinite(options.minimum_ridge_field_value) &&
-            field.value(crossing_point) < options.minimum_ridge_field_value) {
-            continue;
-        }
+        const auto append_crossing = [&](bool is_ridge) {
+            const int label = is_ridge ? 1 : -1;
+            const int direction_index = is_ridge ? 0 : 2;
+            Vec3 crossing_point;
+            const bool found_crossing = options.subdivide_roots
+                ? find_refined_crossing(field, position_of(coarse_grid, edge.first_vertex),
+                      position_of(coarse_grid, edge.second_vertex), first_sample.gradient,
+                      second_sample.gradient, first_sample.eigensystem.vectors[direction_index],
+                      second_sample.eigensystem.vectors[direction_index], is_ridge, options, crossing_point)
+                : find_linear_crossing(position_of(coarse_grid, edge.first_vertex),
+                      position_of(coarse_grid, edge.second_vertex), first_sample.gradient,
+                      second_sample.gradient, first_sample.eigensystem.vectors[direction_index],
+                      second_sample.eigensystem.vectors[direction_index], crossing_point);
+            if (!found_crossing) return false;
+            if (is_ridge && check_ridge_at_crossing) {
+                Mat3 negated_hessian = field.hessian(crossing_point);
+                for (auto& row : negated_hessian) {
+                    for (double& value : row) value = -value;
+                }
+                const OrderedEigenSystem eigen = compute_eigensystem(negated_hessian);
+                if (!(eigen.values[0] + eigen.values[2] > options.minimum_curvature_sum)) {
+                    return false;
+                }
+            }
+            if (is_ridge && std::isfinite(options.minimum_ridge_field_value) &&
+                field.value(crossing_point) < options.minimum_ridge_field_value) {
+                return false;
+            }
 
-        crossing_edges.push_back({edge.first_vertex, edge.second_vertex, edge.incident_tets, label});
-        for (const std::size_t tet_index : edge.incident_tets) {
-            crossing_sum_by_tet[tet_index] += crossing_point;
-            ++crossing_count_by_tet[tet_index];
+            crossing_edges.push_back({edge.first_vertex, edge.second_vertex, edge.incident_tets, label});
+            for (const std::size_t tet_index : edge.incident_tets) {
+                crossing_sum_by_tet[tet_index] += crossing_point;
+                ++crossing_count_by_tet[tet_index];
+            }
+            return true;
+        };
+        if (ridge) {
+            const bool accepted = append_crossing(true);
+            // The broader ridge precheck must not hide a valid valley when
+            // its actual root fails the ridge test. Original mode is unchanged.
+            if (!accepted && check_ridge_at_crossing && valley) append_crossing(false);
+        } else if (valley) {
+            append_crossing(false);
         }
     }
 
