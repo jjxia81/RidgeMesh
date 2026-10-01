@@ -136,9 +136,35 @@ int main() try {
           + std::to_string(grid.get_num_vertices() - initial_count));
     }
   };
-  if (LongestEdgeRefinementOptions{}.pipeline != RefinementPipeline::curvature_orientation) {
+  if (LongestEdgeRefinementOptions{}.pipeline != RefinementPipeline::bezier_simplex) {
     throw std::runtime_error("new adaptive pipeline is not the default");
   }
+  // New sampled-simplex pipeline can see positive interior curvature even
+  // when every original vertex is negative. Curvature boundary follows the
+  // edge-crossing gate and is not controlled by the older boundary flags.
+  DifferentialField3D hidden_curvature_field{
+    [](const Vec3& p) { return Vec3{-p.x, 0, 0}; },
+    [](const Vec3& p) {
+      return Mat3{{{{-3, 0, 0}}, {{0, -1, 0}}, {{0, 0, 1 + 4 * p.x * p.x}}}};
+    },
+  };
+  verify_split_count(hidden_curvature_field, RefinementPipeline::curvature_orientation,
+                     1, 0, 0, false, LinearitySampling::cubic_16, 100, false);
+  verify_split_count(hidden_curvature_field, RefinementPipeline::bezier_simplex,
+                     1, 0, 1, false, LinearitySampling::cubic_16, 100, false);
+  gradient_queries = 0;
+  hidden_curvature_field.gradient = [&](const Vec3&) { ++gradient_queries; return Vec3{1, 0, 0}; };
+  verify_split_count(hidden_curvature_field, RefinementPipeline::bezier_simplex,
+                     1, 0, 0, false, LinearitySampling::cubic_16, 100, false);
+  if (gradient_queries != 20) {
+    throw std::runtime_error("sampled-simplex gate must evaluate exactly sixteen additional locations");
+  }
+  DifferentialField3D simplex_zero_condition = inconsistent_directions_field;
+  simplex_zero_condition.gradient = [](const Vec3&) { return Vec3{}; };
+  verify_split_count(simplex_zero_condition, RefinementPipeline::bezier_simplex,
+                     1, 0, 0, false, LinearitySampling::cubic_16, 100, false);
+  verify_split_count(inconsistent_directions_field, RefinementPipeline::bezier_simplex,
+                     1, 0, 1, false, LinearitySampling::cubic_16, 100, false);
   verify_split_count(curvature_boundary_field, RefinementPipeline::curvature_orientation, 1, 0, 0);
   verify_split_count(curvature_boundary_field, RefinementPipeline::curvature_orientation, 1, 0, 1, true);
   verify_split_count(curvature_boundary_field, RefinementPipeline::curvature_orientation, 10, 4, 0, true);
@@ -180,6 +206,15 @@ int main() try {
     [](const Vec3& p) { return Vec3{-2.0 * p.x, -0.2 * p.y, -0.1 * p.z}; },
     [](const Vec3&) { return Mat3{{{{-2, 0, 0}}, {{0, -0.2, 0}}, {{0, 0, -0.1}}}}; },
   };
+  for (const auto sampling : {LinearitySampling::cubic_16, LinearitySampling::face_centers_5}) {
+    verify_split_count(analytic_field, RefinementPipeline::bezier_simplex, 1, 0, 0, false, sampling);
+    DifferentialField3D cubic_condition_field = analytic_field;
+    cubic_condition_field.gradient = [](const Vec3& p) { return Vec3{p.x * p.x * p.x, 0, 0}; };
+    verify_split_count(cubic_condition_field, RefinementPipeline::bezier_simplex, 1, 0, 1, false, sampling);
+    verify_split_count(cubic_condition_field, RefinementPipeline::bezier_simplex, 1, 0, 0, false, sampling, 10);
+    verify_split_count(cubic_condition_field, RefinementPipeline::bezier_simplex, 0, 0, 0, false, sampling);
+    verify_split_count(cubic_condition_field, RefinementPipeline::bezier_simplex, 1, 4, 0, false, sampling);
+  }
   for (const auto sampling : {LinearitySampling::cubic_16, LinearitySampling::face_centers_5}) {
     // Linearity is the final gate: nonlinearity alone is not eligibility.
     verify_split_count(analytic_field, RefinementPipeline::curvature_orientation, 1, 0, 0, false, sampling);

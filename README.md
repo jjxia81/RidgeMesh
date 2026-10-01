@@ -192,7 +192,7 @@ opt.surface_target = RefinementTarget::ridges; // omit unrelated valley sheets
 SurfaceMesh result = extract_height_ridges(f, bounds, opt);
 ```
 
-The default `RefinementPipeline::curvature_orientation` follows the ridge-only
+The previous `RefinementPipeline::curvature_orientation` follows the ridge-only
 flowchart with a sampled directional-condition linearity check. For each tet:
 
 1. Compute `s = k1 + k3` from the eigenvalues of `-H` at all four vertices.
@@ -242,7 +242,44 @@ refine.linearity_absolute_tolerance = 0.1
 refine.linearity_relative_tolerance = 0.0
 ```
 
-Boundary I and Boundary II are both disabled by default. The default
+### Sampled Bezier-simplex refinement pipeline
+
+Select `RefinementPipeline::bezier_simplex` in C++,
+`rs.RefinementPipeline.bezier_simplex` in Python, or
+`--refinement-pipeline bezier_simplex` in the ellipsoid examples. This is an
+default adaptive pipeline; `curvature_orientation` remains available explicitly.
+
+For each tet, this pipeline follows these checks in order:
+
+1. Evaluate derivatives/eigenpairs at the four cached grid vertices and sixteen
+   additional cubic barycentric locations (twelve edge locations and four face
+   centers). Continue only if any sampled `k1+k3 > 0`.
+2. Require a strict directional crossing on at least one of the six original
+   tet edges, with endpoint eigenvectors aligned independently per edge. The
+   additional samples do not add grid edges or change this crossing test.
+3. If the twenty curvature sums straddle zero (including the configured
+   `curvature_zero_tolerance` uncertainty band), refine.
+4. Otherwise check tet-wide eigenvector orientability; refine if inconsistent.
+5. Otherwise refine only if the maximum sampled directional-condition
+   interpolation error exceeds the linearity tolerance. Reuse the sixteen
+   evaluated samples; `face_centers_5` instead reuses their four face centers
+   and evaluates one additional tet center. `disabled` bypasses this final test.
+
+Boundary I/II checks are intrinsic to this pipeline regardless of the older
+`refine_orientation_boundary` / `refine_curvature_boundary` flags. Ridge steps
+use v1; valley targets mirror curvature signs and use v3. The positive-curvature
+gate is a zero-sign test, independent of `minimum_curvature_sum`; surfacing
+settings are unchanged. These are actual field samples at Bezier domain
+locations, not fitted Bezier coefficients, and there is no interior sample in
+the sixteen-location gate. An original edge whose endpoints show no crossing
+is not subdivided into probe segments by this test, so small hidden surfaces
+can still be missed. Both geometric and split-budget limits remain enforced.
+
+```powershell
+.\vs2022\Release\ellipsoid_linearity_example.exe --refinement-pipeline bezier_simplex --le 0.1
+```
+
+For `curvature_orientation`, Boundary I and Boundary II flags are both disabled by default. The default
 `refine.refine_orientation_boundary = False` tests each of the
 six tet edges independently. The second endpoint's eigenvector is sign-aligned
 to the first before testing for a strict c sign change. Any crossing edge makes
@@ -296,11 +333,12 @@ The public C++/Python functions `directional_linearity_error_16` and
 Set `opt.longest_edge_refinement.pipeline = RefinementPipeline::legacy_crossing`
 to retain the previous curvature-classification plus crossing criterion.
 In Python use `refine.pipeline = rs.RefinementPipeline.legacy_crossing`;
-`rs.RefinementPipeline.curvature_orientation` selects the new default.
+`rs.RefinementPipeline.curvature_orientation` selects the previous pipeline;
+`rs.RefinementPipeline.bezier_simplex` selects the default sampled pipeline.
 These choices do not enable adaptation by themselves: set `target` and
 `max_splits` as above. Uniform extraction is unchanged.
 
-Both pipelines obey `max_splits`, counting actual MTet edge-split operations
+All pipelines obey `max_splits`, counting actual MTet edge-split operations
 (one split can replace multiple incident tets), and `minimum_edge_length`:
 a candidate is discarded when its **longest edge** is at or below this length.
 This is a refinement cutoff, not a guarantee that every child edge has that

@@ -25,7 +25,7 @@ struct OutputChoice {
         ridge_surface::PolygonTriangulation::center_fan;
     bool adaptive = false;
     ridge_surface::RefinementPipeline refinement_pipeline =
-        ridge_surface::RefinementPipeline::curvature_orientation;
+        ridge_surface::RefinementPipeline::bezier_simplex;
     std::string filename;
     std::string grid_filename;
     bool help = false;
@@ -54,13 +54,14 @@ void print_usage(bool linearity_example) {
               << "  [--linearity-sampling cubic_16|face_centers_5|disabled]\n"
               << "  [--max-splits INTEGER] [--minimum-edge-length VALUE]\n"
               << "  [--triangulation center_fan|vertex_fan|polygons_only]\n"
-              << "  [--refinement-pipeline curvature_orientation|legacy_crossing]\n"
+              << "  [--refinement-pipeline curvature_orientation|legacy_crossing|bezier_simplex]\n"
               << "  [--ridge-curvature-filter both_endpoints|crossing_point]\n"
               << "  [--check-crossing-point-curvature]\n"
               << "  [--enable-boundary-i] [--enable-boundary-ii]\n"
               << "  [--disable-boundary-i] [--disable-boundary-ii]\n"
               << "defaults: tolerance=0.1, sampling=cubic_16, max-splits=100000, "
-                 "minimum-edge-length=0.005; Boundary I and II disabled; curvature filter=crossing_point; step 3 disabled\n";
+                 "minimum-edge-length=0.005; pipeline=bezier_simplex (intrinsic Boundary I/II checks); "
+                 "curvature filter=crossing_point; surfacing step 3 disabled\n";
 }
 
 OutputChoice choose_output(int argc, char* argv[], bool linearity_example) {
@@ -121,6 +122,8 @@ OutputChoice choose_output(int argc, char* argv[], bool linearity_example) {
                 choice.refinement_pipeline = ridge_surface::RefinementPipeline::curvature_orientation;
             } else if (mode == "legacy_crossing") {
                 choice.refinement_pipeline = ridge_surface::RefinementPipeline::legacy_crossing;
+            } else if (mode == "bezier_simplex") {
+                choice.refinement_pipeline = ridge_surface::RefinementPipeline::bezier_simplex;
             } else {
                 throw std::invalid_argument("unknown refinement pipeline");
             }
@@ -330,8 +333,13 @@ int run_ellipsoid_example(int argc, char* argv[], bool linearity_example) try {
         std::cout << "actual edge splits: " << grid.get_num_vertices() - initial_vertex_count
                   << " / " << choice.max_splits << "\n"
                   << "linearity absolute tolerance: " << choice.absolute_tolerance
-                  << ", Boundary I: " << (choice.refine_orientation_boundary ? "enabled" : "disabled (edge crossings)")
-                  << ", Boundary II: " << (choice.refine_curvature_boundary ? "enabled" : "disabled")
+                  << ", pipeline: " << (choice.refinement_pipeline == RefinementPipeline::bezier_simplex
+                      ? "bezier_simplex" : choice.refinement_pipeline == RefinementPipeline::curvature_orientation
+                      ? "curvature_orientation" : "legacy_crossing")
+                  << ", Boundary I: " << (choice.refinement_pipeline == RefinementPipeline::bezier_simplex
+                      ? "intrinsic" : choice.refine_orientation_boundary ? "enabled" : "disabled (edge crossings)")
+                  << ", Boundary II: " << (choice.refinement_pipeline == RefinementPipeline::bezier_simplex
+                      ? "intrinsic" : choice.refine_curvature_boundary ? "enabled" : "disabled")
                   << ", relative tolerance: 0, minimum edge length: " << choice.minimum_edge_length
                   << "\nwrote " << choice.grid_filename << '\n';
     }

@@ -100,7 +100,8 @@ PYBIND11_MODULE(ridge_surface, module) {
 
     py::enum_<RefinementPipeline>(module, "RefinementPipeline")
         .value("curvature_orientation", RefinementPipeline::curvature_orientation)
-        .value("legacy_crossing", RefinementPipeline::legacy_crossing);
+        .value("legacy_crossing", RefinementPipeline::legacy_crossing)
+        .value("bezier_simplex", RefinementPipeline::bezier_simplex);
 
     py::enum_<LinearitySampling>(module, "LinearitySampling")
         .value("cubic_16", LinearitySampling::cubic_16)

@@ -314,6 +314,121 @@ LinearityError evaluate_directional_linearity(
     return result;
 }
 
+std::array<std::array<double, 4>, 16> cubic_sample_weights() {
+    std::array<std::array<double, 4>, 16> weights{};
+    std::size_t sample_index = 0;
+    for (std::size_t first = 0; first < 4; ++first) {
+        for (std::size_t second = 0; second < 4; ++second) {
+            if (first == second) continue;
+            weights[sample_index][first] = 2.0 / 3.0;
+            weights[sample_index++][second] = 1.0 / 3.0;
+        }
+    }
+    for (std::size_t opposite = 0; opposite < 4; ++opposite) {
+        weights[sample_index].fill(1.0 / 3.0);
+        weights[sample_index++][opposite] = 0.0;
+    }
+    return weights;
+}
+
+bool should_refine_bezier_simplex(
+    const mtet::MTetMesh& mesh,
+    const DifferentialField3D& field,
+    std::span<const mtet::VertexId, 4> tet_vertices,
+    const std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id,
+    const LongestEdgeRefinementOptions& options) {
+    // These are re-evaluated samples at cubic barycentric locations, not
+    // Bernstein coefficients. Cache all 20 for this tet's decision only.
+    const auto weights = cubic_sample_weights();
+    std::array<Vec3, 4> positions;
+    std::array<VertexSample, 20> samples;
+    for (std::size_t index = 0; index < 4; ++index) {
+        positions[index] = position_of(mesh, tet_vertices[index]);
+        samples[index] = samples_by_vertex_id.at(tet_vertices[index].value_of());
+    }
+    for (std::size_t index = 0; index < weights.size(); ++index) {
+        Vec3 point{};
+        for (std::size_t vertex = 0; vertex < 4; ++vertex) {
+            point += positions[vertex] * weights[index][vertex];
+        }
+        samples[index + 4] = evaluate_vertex_sample(field, point);
+    }
+
+    const auto selected_surface_needs_refinement = [&](bool ridge) {
+        double minimum_sum = std::numeric_limits<double>::infinity();
+        double maximum_sum = -std::numeric_limits<double>::infinity();
+        for (const VertexSample& sample : samples) {
+            const double signed_sum = ridge ? sample.curvature_sum : -sample.curvature_sum;
+            if (!std::isfinite(signed_sum)) {
+                throw std::runtime_error("non-finite Bezier-simplex curvature sample");
+            }
+            minimum_sum = std::min(minimum_sum, signed_sum);
+            maximum_sum = std::max(maximum_sum, signed_sum);
+        }
+        // 1. A positive curvature sum anywhere among the 20 locations.
+        if (!(maximum_sum > 0.0)) return false;
+        const int direction_index = ridge ? 0 : 2;
+        // 2. A strict crossing on any of the six original tet edges, using
+        // independent pair orientation. Sample locations do not add grid edges.
+        if (!has_edge_condition_crossing(tet_vertices, samples_by_vertex_id, direction_index)) {
+            return false;
+        }
+        // 3. Curvature boundary, now tested on all 20 sampled values.
+        if (minimum_sum <= options.curvature_zero_tolerance &&
+            maximum_sum >= -options.curvature_zero_tolerance) {
+            return true;
+        }
+        // 4. Tet-wide orientability. Unlike the older pipeline these two
+        // boundary checks are intrinsic to this explicitly selected pipeline.
+        if (!tet_directions_are_orientable(tet_vertices, samples_by_vertex_id, direction_index)) {
+            return true;
+        }
+        // 5. Linearity comes last. Reuse the 16 samples already evaluated.
+        if (options.linearity_sampling == LinearitySampling::disabled) return true;
+        const Vec3 reference = samples[0].eigensystem.vectors[direction_index];
+        const auto condition_value = [&](const VertexSample& sample) {
+            Vec3 direction = sample.eigensystem.vectors[direction_index];
+            if (dot(direction, reference) < 0.0) direction = direction * -1.0;
+            return dot(sample.gradient, direction);
+        };
+        LinearityError error;
+        std::array<double, 4> vertex_values;
+        for (std::size_t index = 0; index < 4; ++index) {
+            vertex_values[index] = condition_value(samples[index]);
+            error.maximum_absolute_value = std::max(
+                error.maximum_absolute_value, std::abs(vertex_values[index]));
+        }
+        const auto compare = [&](const VertexSample& sample, const std::array<double, 4>& barycentric) {
+            double linear_value = 0.0;
+            for (std::size_t index = 0; index < 4; ++index) {
+                linear_value += vertex_values[index] * barycentric[index];
+            }
+            const double actual_value = condition_value(sample);
+            if (!std::isfinite(actual_value) || !std::isfinite(linear_value)) {
+                throw std::runtime_error("non-finite Bezier-simplex condition sample");
+            }
+            error.maximum_difference = std::max(error.maximum_difference, std::abs(actual_value - linear_value));
+            error.maximum_absolute_value = std::max(error.maximum_absolute_value, std::abs(actual_value));
+        };
+        const std::size_t first_sample = options.linearity_sampling == LinearitySampling::face_centers_5 ? 12 : 0;
+        for (std::size_t index = first_sample; index < weights.size(); ++index) {
+            compare(samples[index + 4], weights[index]);
+        }
+        if (options.linearity_sampling == LinearitySampling::face_centers_5) {
+            const Vec3 center = (positions[0] + positions[1] + positions[2] + positions[3]) / 4.0;
+            compare(evaluate_vertex_sample(field, center), {.25, .25, .25, .25});
+        }
+        return error.maximum_difference > options.linearity_absolute_tolerance +
+            options.linearity_relative_tolerance * error.maximum_absolute_value;
+    };
+    const bool ridges = options.target == RefinementTarget::ridges ||
+                        options.target == RefinementTarget::ridges_and_valleys;
+    const bool valleys = options.target == RefinementTarget::valleys ||
+                         options.target == RefinementTarget::ridges_and_valleys;
+    return (ridges && selected_surface_needs_refinement(true)) ||
+           (valleys && selected_surface_needs_refinement(false));
+}
+
 bool should_refine_tet(
     const mtet::MTetMesh& mesh,
     const DifferentialField3D& field,
@@ -327,6 +442,10 @@ bool should_refine_tet(
     }
     if (options.target == RefinementTarget::none) {
         return false;
+    }
+
+    if (options.pipeline == RefinementPipeline::bezier_simplex) {
+        return should_refine_bezier_simplex(mesh, field, tet_vertices, samples_by_vertex_id, options);
     }
 
     bool all_positive = true;

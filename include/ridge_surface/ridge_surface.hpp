@@ -55,6 +55,7 @@ enum class PolygonTriangulation {
 enum class RefinementPipeline {
   curvature_orientation, // curvature boundary, tet orientability, then crossing
   legacy_crossing,       // previous curvature classification + crossing test
+  bezier_simplex,        // 20-point curvature gate, edge crossing, boundaries, linearity
 };
 
 enum class LinearitySampling {
@@ -75,7 +76,7 @@ struct LongestEdgeRefinementOptions {
   RefinementTarget target = RefinementTarget::none;
   int max_splits = 0;
   double minimum_edge_length = 0.0;
-  RefinementPipeline pipeline = RefinementPipeline::curvature_orientation;
+  RefinementPipeline pipeline = RefinementPipeline::bezier_simplex;
   double curvature_zero_tolerance = 1e-12; // new pipeline's Boundary II uncertainty band
   bool refine_curvature_boundary = false; // optional Boundary II trigger; new pipeline only
   bool refine_orientation_boundary = false; // false: skip Boundary I and use edge-local crossings
