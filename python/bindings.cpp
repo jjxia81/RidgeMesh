@@ -43,6 +43,7 @@ SurfaceMesh extract_from_scalar(
         py::gil_scoped_acquire acquire;
         return function(point.x, point.y, point.z).cast<double>();
     };
+    py::gil_scoped_release release;
     return extract_height_ridges(field, bounds, options);
 }
 
@@ -68,6 +69,7 @@ SurfaceMesh extract_from_derivatives(
         py::gil_scoped_acquire acquire;
         return as_mat3(hessian(point.x, point.y, point.z));
     };
+    py::gil_scoped_release release;
     return extract_height_ridges(field, bounds, options);
 }
 
@@ -130,6 +132,8 @@ PYBIND11_MODULE(ridge_surface, module) {
         .def_readwrite("nx", &SurfaceOptions::nx)
         .def_readwrite("ny", &SurfaceOptions::ny)
         .def_readwrite("nz", &SurfaceOptions::nz)
+        .def_readwrite("parallel_initial_sampling", &SurfaceOptions::parallel_initial_sampling)
+        .def_readwrite("parallel_edge_crossings", &SurfaceOptions::parallel_edge_crossings)
         .def_readwrite("longest_edge_refinement", &SurfaceOptions::longest_edge_refinement)
         .def_readwrite("surface_target", &SurfaceOptions::surface_target)
         .def_readwrite("subdivide_roots", &SurfaceOptions::subdivide_roots)

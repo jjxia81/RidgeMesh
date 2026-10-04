@@ -3,11 +3,14 @@
 
 #include <mtet/grid.h>
 #include <mtet/mtet.h>
+#include <nanothread/nanothread.h>
 
 #include <algorithm>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <stdexcept>
 #include <unordered_map>
 #include <vector>
@@ -37,6 +40,11 @@ struct CrossingEdge {
     mtet::VertexId second_vertex;
     std::vector<std::size_t> incident_tets;
     int label; // +1 = ridge, -1 = valley.
+};
+
+struct EdgeCrossingResult {
+    Vec3 point;
+    int label = 0; // Zero means the edge produced no accepted crossing.
 };
 
 mtet::MTetMesh make_kuhn_grid(const Bounds3D& bounds, int nx, int ny, int nz) {
@@ -277,10 +285,45 @@ SurfaceMesh extract_height_ridges_from_grid(
     // 1. Evaluate derivatives and classify each grid vertex.
     std::unordered_map<std::uint64_t, VertexSample> samples_by_vertex_id;
     samples_by_vertex_id.reserve(coarse_grid.get_num_vertices());
-    coarse_grid.seq_foreach_vertex([&](mtet::VertexId vertex_id, auto position) {
-        samples_by_vertex_id.emplace(
-            vertex_id.value_of(), evaluate_vertex_sample(field, {position[0], position[1], position[2]}));
-    });
+    if (options.parallel_initial_sampling) {
+        // First pass: collect stable IDs and positions without concurrent MTet access.
+        struct GridVertex {
+            std::uint64_t id;
+            Vec3 position;
+        };
+        std::vector<GridVertex> vertices;
+        vertices.reserve(coarse_grid.get_num_vertices());
+        coarse_grid.seq_foreach_vertex([&](mtet::VertexId id, auto position) {
+            vertices.push_back({id.value_of(), {position[0], position[1], position[2]}});
+        });
+
+        // Second pass: each worker owns one output slot; no hash-map writes.
+        std::vector<VertexSample> evaluated(vertices.size());
+        std::exception_ptr evaluation_error;
+        std::mutex error_mutex;
+        drjit::parallel_for(drjit::blocked_range<std::size_t>(0, vertices.size(), 1),
+            [&](drjit::blocked_range<std::size_t> range) {
+                for (std::size_t index = range.begin(); index != range.end(); ++index) {
+                    try {
+                        evaluated[index] = evaluate_vertex_sample(field, vertices[index].position);
+                    } catch (...) {
+                        std::lock_guard<std::mutex> lock(error_mutex);
+                        if (!evaluation_error) evaluation_error = std::current_exception();
+                    }
+                }
+            });
+        if (evaluation_error) std::rethrow_exception(evaluation_error);
+
+        // Publish samples only after all workers have finished.
+        for (std::size_t index = 0; index < vertices.size(); ++index) {
+            samples_by_vertex_id.emplace(vertices[index].id, evaluated[index]);
+        }
+    } else {
+        coarse_grid.seq_foreach_vertex([&](mtet::VertexId vertex_id, auto position) {
+            samples_by_vertex_id.emplace(vertex_id.value_of(),
+                evaluate_vertex_sample(field, {position[0], position[1], position[2]}));
+        });
+    }
 
     // 2. Adapt the coarse MTet grid before locating surface crossings.
     // MTet splits the entire edge one-ring, preserving a conforming tet mesh.
@@ -293,10 +336,13 @@ SurfaceMesh extract_height_ridges_from_grid(
     std::vector<Vec3> crossing_sum_by_tet(tet_count);
     std::vector<int> crossing_count_by_tet(tet_count);
     std::vector<CrossingEdge> crossing_edges;
+    const std::vector<GridEdge> grid_edges = build_edge_adjacency(coarse_grid);
+    const auto& vertex_samples = samples_by_vertex_id;
 
-    for (const GridEdge& edge : build_edge_adjacency(coarse_grid)) {
-        const VertexSample& first_sample = samples_by_vertex_id.at(edge.first_vertex.value_of());
-        const VertexSample& second_sample = samples_by_vertex_id.at(edge.second_vertex.value_of());
+    // This phase reads the finished grid and derivative cache; each edge is independent.
+    const auto evaluate_edge = [&](const GridEdge& edge) {
+        const VertexSample& first_sample = vertex_samples.at(edge.first_vertex.value_of());
+        const VertexSample& second_sample = vertex_samples.at(edge.second_vertex.value_of());
         const bool extract_ridges = options.surface_target == RefinementTarget::ridges ||
             options.surface_target == RefinementTarget::ridges_and_valleys;
         const bool extract_valleys = options.surface_target == RefinementTarget::valleys ||
@@ -312,19 +358,20 @@ SurfaceMesh extract_height_ridges_from_grid(
         const bool valley = extract_valleys &&
             first_sample.curvature_sum < -options.minimum_curvature_sum &&
             second_sample.curvature_sum < -options.minimum_curvature_sum;
-        if (!ridge && !valley) continue;
 
-        const auto append_crossing = [&](bool is_ridge) {
-            const int label = is_ridge ? 1 : -1;
+        EdgeCrossingResult result;
+        if (!ridge && !valley) return result;
+
+        const Vec3 first_point = position_of(coarse_grid, edge.first_vertex);
+        const Vec3 second_point = position_of(coarse_grid, edge.second_vertex);
+        const auto try_crossing = [&](bool is_ridge) {
             const int direction_index = is_ridge ? 0 : 2;
             Vec3 crossing_point;
             const bool found_crossing = options.subdivide_roots
-                ? find_refined_crossing(field, position_of(coarse_grid, edge.first_vertex),
-                      position_of(coarse_grid, edge.second_vertex), first_sample.gradient,
+                ? find_refined_crossing(field, first_point, second_point, first_sample.gradient,
                       second_sample.gradient, first_sample.eigensystem.vectors[direction_index],
                       second_sample.eigensystem.vectors[direction_index], is_ridge, options, crossing_point)
-                : find_linear_crossing(position_of(coarse_grid, edge.first_vertex),
-                      position_of(coarse_grid, edge.second_vertex), first_sample.gradient,
+                : find_linear_crossing(first_point, second_point, first_sample.gradient,
                       second_sample.gradient, first_sample.eigensystem.vectors[direction_index],
                       second_sample.eigensystem.vectors[direction_index], crossing_point);
             if (!found_crossing) return false;
@@ -342,21 +389,51 @@ SurfaceMesh extract_height_ridges_from_grid(
                 field.value(crossing_point) < options.minimum_ridge_field_value) {
                 return false;
             }
-
-            crossing_edges.push_back({edge.first_vertex, edge.second_vertex, edge.incident_tets, label});
-            for (const std::size_t tet_index : edge.incident_tets) {
-                crossing_sum_by_tet[tet_index] += crossing_point;
-                ++crossing_count_by_tet[tet_index];
-            }
+            result = {crossing_point, is_ridge ? 1 : -1};
             return true;
         };
         if (ridge) {
-            const bool accepted = append_crossing(true);
-            // The broader ridge precheck must not hide a valid valley when
-            // its actual root fails the ridge test. Original mode is unchanged.
-            if (!accepted && check_ridge_at_crossing && valley) append_crossing(false);
+            const bool accepted = try_crossing(true);
+            // A failed ridge-root test must not hide a valid valley crossing.
+            if (!accepted && check_ridge_at_crossing && valley) try_crossing(false);
         } else if (valley) {
-            append_crossing(false);
+            try_crossing(false);
+        }
+        return result;
+    };
+
+    const auto record_crossing = [&](const GridEdge& edge, const EdgeCrossingResult& result) {
+        if (result.label == 0) return;
+        crossing_edges.push_back({edge.first_vertex, edge.second_vertex, edge.incident_tets, result.label});
+        for (const std::size_t tet_index : edge.incident_tets) {
+            crossing_sum_by_tet[tet_index] += result.point;
+            ++crossing_count_by_tet[tet_index];
+        }
+    };
+
+    if (options.parallel_edge_crossings) {
+        std::vector<EdgeCrossingResult> results(grid_edges.size());
+        std::exception_ptr evaluation_error;
+        std::mutex error_mutex;
+        drjit::parallel_for(drjit::blocked_range<std::size_t>(0, grid_edges.size(), 64),
+            [&](drjit::blocked_range<std::size_t> range) {
+                for (std::size_t index = range.begin(); index != range.end(); ++index) {
+                    try {
+                        results[index] = evaluate_edge(grid_edges[index]);
+                    } catch (...) {
+                        std::lock_guard<std::mutex> lock(error_mutex);
+                        if (!evaluation_error) evaluation_error = std::current_exception();
+                    }
+                }
+            });
+        if (evaluation_error) std::rethrow_exception(evaluation_error);
+        // Reduce in grid-edge order to keep dual-vertex coordinates and face order stable.
+        for (std::size_t index = 0; index < grid_edges.size(); ++index) {
+            record_crossing(grid_edges[index], results[index]);
+        }
+    } else {
+        for (const GridEdge& edge : grid_edges) {
+            record_crossing(edge, evaluate_edge(edge));
         }
     }
 

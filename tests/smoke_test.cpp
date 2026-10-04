@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cmath>
 #include <map>
@@ -20,6 +21,12 @@ int main() try {
   }
   if (SurfaceOptions{}.check_crossing_point_curvature) {
     throw std::runtime_error("crossing-point curvature step 3 should default to disabled");
+  }
+  if (!SurfaceOptions{}.parallel_edge_crossings) {
+    throw std::runtime_error("edge-crossing parallelism should default to enabled");
+  }
+  if (!SurfaceOptions{}.parallel_initial_sampling) {
+    throw std::runtime_error("initial-grid sampling should default to parallel");
   }
   // One endpoint fails k1+k2, the other passes. The actual root has k1+k3=.2.
   const DifferentialField3D crossing_curvature_field{
@@ -54,6 +61,81 @@ int main() try {
       throw std::runtime_error("crossing-point curvature threshold was not enforced");
     }
     curvature_options.minimum_curvature_sum = 0.0;
+  }
+  // Initial-grid derivatives can be evaluated in indexed parallel slots,
+  // then published to the vertex-ID map in a single thread.
+  std::atomic<int> initial_gradient_calls{0};
+  std::atomic<int> initial_hessian_calls{0};
+  const DifferentialField3D parallel_field{
+    [&](const Vec3& point) {
+      ++initial_gradient_calls;
+      return Vec3{-2.0 * point.x, 0, 0};
+    },
+    [&](const Vec3&) {
+      ++initial_hessian_calls;
+      return Mat3{{{{-2, 0, 0}}, {{0, -1, 0}}, {{0, 0, -.5}}}};
+    },
+    [](const Vec3& point) { return -point.x * point.x; },
+  };
+  SurfaceOptions sampling_options;
+  sampling_options.nx = sampling_options.ny = sampling_options.nz = 13;
+  sampling_options.surface_target = RefinementTarget::ridges;
+  sampling_options.subdivide_roots = false;
+  sampling_options.parallel_initial_sampling = false;
+  const Bounds3D sampling_bounds{{-1, -1, -1}, {1, 1, 1}};
+  const auto serial_surface = extract_height_ridges(parallel_field, sampling_bounds, sampling_options);
+  const int expected_initial_calls = 14 * 14 * 14;
+  if (initial_gradient_calls != expected_initial_calls ||
+      initial_hessian_calls != expected_initial_calls || serial_surface.ridge_triangles.empty()) {
+    throw std::runtime_error("serial initial-grid sampling regression");
+  }
+  initial_gradient_calls = initial_hessian_calls = 0;
+  sampling_options.parallel_initial_sampling = true;
+  const auto parallel_surface = extract_height_ridges(parallel_field, sampling_bounds, sampling_options);
+  if (initial_gradient_calls != expected_initial_calls ||
+      initial_hessian_calls != expected_initial_calls ||
+      parallel_surface.vertices.size() != serial_surface.vertices.size() ||
+      parallel_surface.ridge_triangles.size() != serial_surface.ridge_triangles.size()) {
+    throw std::runtime_error("parallel initial-grid sampling changed the mesh or query count");
+  }
+  for (std::size_t index = 0; index < serial_surface.vertices.size(); ++index) {
+    const Vec3 a = serial_surface.vertices[index];
+    const Vec3 b = parallel_surface.vertices[index];
+    if (a.x != b.x || a.y != b.y || a.z != b.z) {
+      throw std::runtime_error("parallel initial-grid sampling changed a surface vertex");
+    }
+  }
+  for (std::size_t index = 0; index < serial_surface.ridge_triangles.size(); ++index) {
+    if (serial_surface.ridge_triangles[index].indices != parallel_surface.ridge_triangles[index].indices) {
+      throw std::runtime_error("parallel initial-grid sampling changed a triangle");
+    }
+  }
+  // Edge-local searches may run concurrently, but their per-tet accumulation
+  // must retain the original edge order and produce exactly the same mesh.
+  sampling_options.parallel_initial_sampling = false;
+  sampling_options.subdivide_roots = true;
+  sampling_options.minimum_ridge_field_value = -.1;
+  sampling_options.parallel_edge_crossings = false;
+  const auto serial_edge_surface = extract_height_ridges(parallel_field, sampling_bounds, sampling_options);
+  sampling_options.parallel_edge_crossings = true;
+  const auto parallel_edge_surface = extract_height_ridges(parallel_field, sampling_bounds, sampling_options);
+  if (serial_edge_surface.vertices.size() != parallel_edge_surface.vertices.size() ||
+      serial_edge_surface.ridge_triangles.size() != parallel_edge_surface.ridge_triangles.size() ||
+      serial_edge_surface.ridge_triangles.empty()) {
+    throw std::runtime_error("parallel edge crossings changed surface counts");
+  }
+  for (std::size_t index = 0; index < serial_edge_surface.vertices.size(); ++index) {
+    const Vec3 a = serial_edge_surface.vertices[index];
+    const Vec3 b = parallel_edge_surface.vertices[index];
+    if (a.x != b.x || a.y != b.y || a.z != b.z) {
+      throw std::runtime_error("parallel edge crossings changed a dual vertex");
+    }
+  }
+  for (std::size_t index = 0; index < serial_edge_surface.ridge_triangles.size(); ++index) {
+    if (serial_edge_surface.ridge_triangles[index].indices !=
+        parallel_edge_surface.ridge_triangles[index].indices) {
+      throw std::runtime_error("parallel edge crossings changed a triangle");
+    }
   }
   const std::array<Vec3, 4> unit_tet{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
   int gradient_queries = 0;

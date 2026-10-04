@@ -192,6 +192,28 @@ opt.surface_target = RefinementTarget::ridges; // omit unrelated valley sheets
 SurfaceMesh result = extract_height_ridges(f, bounds, opt);
 ```
 
+For thread-safe native C++ gradient and Hessian callbacks, initial-grid
+sampling is parallel by default (`opt.parallel_initial_sampling = true`). It
+uses two passes: collect vertex IDs and positions, evaluate into independent
+slots in parallel, then populate the ID-indexed cache serially. Set the option
+to `false` for callbacks that are not thread-safe. This parallelizes only initial-grid derivative
+sampling, not adaptive splitting or polygon assembly. Python exposes the same
+option, but Python callbacks acquire the GIL and therefore do not run
+concurrently; use `uniform_grid_batch_size` in `extract_torch_udf` for batched
+neural-field queries instead.
+
+Directional zero crossings are evaluated on separate grid edges concurrently
+by default (`opt.parallel_edge_crossings = true`). Set it to `false` for
+non-thread-safe callbacks or to compare with the serial path. The edge-to-tet
+accumulation remains serial and ordered, preserving the same dual mesh.
+This option also requires thread-safe gradient, Hessian, and optional scalar
+value callbacks. Python exposes `parallel_edge_crossings`, but Python callbacks
+remain GIL-serialized.
+
+The ellipsoid command-line examples enable both parallel stages by default.
+Use `--no-parallel-initial-sampling` or `--no-parallel-edge-crossings` to
+disable either stage. The corresponding positive flags remain accepted.
+
 The previous `RefinementPipeline::curvature_orientation` follows the ridge-only
 flowchart with a sampled directional-condition linearity check. For each tet:
 
@@ -418,11 +440,14 @@ wireframe.
 
 `ellipsoid_example` is a separate analytic example for
 \(F(x) = -(x^2/a^2 + y^2/b^2 + z^2/c^2 - 1)^2\). It writes
-`ellipsoid_ridge.ply`, a uniform-grid ridge mesh for a flattened sphere
+`ellipsoid_ridge_crossing_point.ply`, a uniform 64-cells-per-axis ridge mesh for a flattened sphere
 with semi-axes \(a=b=0.75\) and \(c=0.25\). It uses the default center-fan
-triangulation. Run `ellipsoid_example --adaptive` to start instead from a
-`4 x 4 x 4` MTet grid and apply up to 100,000 longest-edge splits around the
-ridge. That run writes `ellipsoid_adaptive_ridge.ply` and
+triangulation. Run `ellipsoid_example --res 128` for a uniform 128-cells-per-axis
+grid; this writes `ellipsoid_ridge_res128_crossing_point.ply` and requires
+substantially more time and memory than the default. `--res` is for uniform
+runs only. Run `ellipsoid_example --adaptive` to start instead from a
+`4 x 4 x 4` MTet grid and apply up to 10,000,000 longest-edge splits around the
+ridge. That run writes `ellipsoid_adaptive_ridge_crossing_point.ply` and
 `ellipsoid_adaptive_grid_wireframe.ply`; the latter shows the refined grid edges.
 Set
 `SurfaceOptions::retain_dual_polygons` to access the ordered dual-vertex rings

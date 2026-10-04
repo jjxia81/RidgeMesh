@@ -97,6 +97,12 @@ double directional_linearity_error_5(const DifferentialField3D& field,
 
 struct SurfaceOptions {
   int nx = 32, ny = 32, nz = 32;       // cells along x/y/z
+  // Default on; set false if field callbacks are not safe to call concurrently.
+  // Python callbacks are GIL-serialized even when this is enabled.
+  bool parallel_initial_sampling = true;
+  // Default on; set false if field callbacks are not safe to call concurrently.
+  // Edge results are reduced in their original order after parallel evaluation.
+  bool parallel_edge_crossings = true;
   // The coarse TET6 grid is refined before surfacing when enabled.
   LongestEdgeRefinementOptions longest_edge_refinement;
   // Choose which extracted surfaces are emitted. The default preserves the

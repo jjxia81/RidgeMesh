@@ -16,7 +16,7 @@ add_library(ridge_surface src/ridge_surface.cpp src/adaptive_refine.cpp)
 target_include_directories(ridge_surface PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_compile_features(ridge_surface PUBLIC cxx_std_20)
 # MTet is public because the API accepts an mtet::MTetMesh supplied by callers.
-target_link_libraries(ridge_surface PUBLIC mtet::mtet PRIVATE Eigen3::Eigen)
+target_link_libraries(ridge_surface PUBLIC mtet::mtet PRIVATE Eigen3::Eigen nanothread::nanothread)
 if(MSVC)
   # MTet's fmt dependency requires Unicode source support on MSVC.
   target_compile_options(mtet PUBLIC /utf-8)

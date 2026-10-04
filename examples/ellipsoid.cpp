@@ -24,6 +24,8 @@ struct OutputChoice {
     ridge_surface::PolygonTriangulation triangulation =
         ridge_surface::PolygonTriangulation::center_fan;
     bool adaptive = false;
+    bool parallel_initial_sampling = true;
+    bool parallel_edge_crossings = true;
     ridge_surface::RefinementPipeline refinement_pipeline =
         ridge_surface::RefinementPipeline::bezier_simplex;
     std::string filename;
@@ -32,6 +34,8 @@ struct OutputChoice {
     double absolute_tolerance = 0.1;
     ridge_surface::LinearitySampling sampling = ridge_surface::LinearitySampling::cubic_16;
     int max_splits = 10'000'000;
+    int uniform_resolution = 64;
+    bool resolution_was_set = false;
     double minimum_edge_length = 0.005;
     bool refine_orientation_boundary = false;
     bool refine_curvature_boundary = false;
@@ -50,18 +54,22 @@ double nonnegative_number(const std::string& text, const char* option) {
 
 void print_usage(bool linearity_example) {
     std::cout << "usage: " << (linearity_example ? "ellipsoid_linearity_example" : "ellipsoid_example")
-              << " [--adaptive] [--le VALUE]\n"
+              << " [--adaptive] [--res CELLS] [--le VALUE]\n"
               << "  [--linearity-sampling cubic_16|face_centers_5|disabled]\n"
               << "  [--max-splits INTEGER] [--minimum-edge-length VALUE]\n"
               << "  [--triangulation center_fan|vertex_fan|polygons_only]\n"
               << "  [--refinement-pipeline curvature_orientation|legacy_crossing|bezier_simplex]\n"
               << "  [--ridge-curvature-filter both_endpoints|crossing_point]\n"
               << "  [--check-crossing-point-curvature]\n"
+              << "  [--parallel-initial-sampling|--no-parallel-initial-sampling]\n"
+              << "  [--parallel-edge-crossings|--no-parallel-edge-crossings]\n"
               << "  [--enable-boundary-i] [--enable-boundary-ii]\n"
               << "  [--disable-boundary-i] [--disable-boundary-ii]\n"
+              << "--res sets cells per axis for uniform runs only (default: 64)\n"
               << "defaults: tolerance=0.1, sampling=cubic_16, max-splits=10000000, "
                  "minimum-edge-length=0.005; pipeline=bezier_simplex (intrinsic Boundary I/II checks); "
-                 "curvature filter=crossing_point; surfacing step 3 disabled\n";
+                 "curvature filter=crossing_point; surfacing step 3 disabled; "
+                 "parallel initial sampling and edge crossings enabled\n";
 }
 
 OutputChoice choose_output(int argc, char* argv[], bool linearity_example) {
@@ -75,6 +83,14 @@ OutputChoice choose_output(int argc, char* argv[], bool linearity_example) {
             return choice;
         } else if (argument == "--adaptive") {
             choice.adaptive = true;
+        } else if (argument == "--parallel-initial-sampling") {
+            choice.parallel_initial_sampling = true;
+        } else if (argument == "--no-parallel-initial-sampling") {
+            choice.parallel_initial_sampling = false;
+        } else if (argument == "--parallel-edge-crossings") {
+            choice.parallel_edge_crossings = true;
+        } else if (argument == "--no-parallel-edge-crossings") {
+            choice.parallel_edge_crossings = false;
         } else if (argument == "--disable-boundary-i") {
             choice.refine_orientation_boundary = false;
         } else if (argument == "--enable-boundary-i") {
@@ -85,6 +101,14 @@ OutputChoice choose_output(int argc, char* argv[], bool linearity_example) {
             choice.refine_curvature_boundary = true;
         } else if (argument == "--check-crossing-point-curvature") {
             choice.check_crossing_point_curvature = true;
+        } else if (argument == "--res" && index + 1 < argc) {
+            const std::string text(argv[++index]);
+            std::size_t consumed = 0;
+            choice.uniform_resolution = std::stoi(text, &consumed);
+            if (consumed != text.size() || choice.uniform_resolution < 1) {
+                throw std::invalid_argument("--res requires a positive integer");
+            }
+            choice.resolution_was_set = true;
         } else if ((argument == "--le" || argument == "--linearity-absolute-tolerance") && index + 1 < argc) {
             choice.absolute_tolerance = nonnegative_number(argv[++index], "--le");
         } else if (argument == "--minimum-edge-length" && index + 1 < argc) {
@@ -143,8 +167,15 @@ OutputChoice choose_output(int argc, char* argv[], bool linearity_example) {
         }
     }
 
+    if (choice.adaptive && choice.resolution_was_set) {
+        throw std::invalid_argument("--res applies only to uniform runs; omit --adaptive");
+    }
+
     choice.filename = linearity_example ? "ellipsoid_linearity_ridge"
         : (choice.adaptive ? "ellipsoid_adaptive_ridge" : "ellipsoid_ridge");
+    if (choice.resolution_was_set) {
+        choice.filename += "_res" + std::to_string(choice.uniform_resolution);
+    }
     choice.grid_filename = linearity_example ? "ellipsoid_linearity_grid_wireframe.ply"
                                             : "ellipsoid_adaptive_grid_wireframe.ply";
     if (choice.curvature_filter == ridge_surface::RidgeCurvatureFilter::crossing_point) {
@@ -288,12 +319,17 @@ int run_ellipsoid_example(int argc, char* argv[], bool linearity_example) try {
     // Offset the x bound so the ellipsoid does not coincide with a grid plane.
     const std::array<std::size_t, 3> resolution = choice.adaptive
         ? std::array<std::size_t, 3>{4, 4, 4}
-        : std::array<std::size_t, 3>{64, 64, 64};
+        : std::array<std::size_t, 3>{
+            static_cast<std::size_t>(choice.uniform_resolution),
+            static_cast<std::size_t>(choice.uniform_resolution),
+            static_cast<std::size_t>(choice.uniform_resolution)};
     mtet::MTetMesh grid = mtet::generate_tet_grid(
         resolution, {-0.98, -1.0, -0.40}, {1.02, 1.0, 0.40}, mtet::TET6);
     const std::size_t initial_vertex_count = grid.get_num_vertices();
     const std::size_t initial_tet_count = grid.get_num_tets();
     SurfaceOptions options;
+    options.parallel_initial_sampling = choice.parallel_initial_sampling;
+    options.parallel_edge_crossings = choice.parallel_edge_crossings;
     options.surface_target = RefinementTarget::ridges;
     options.ridge_curvature_filter = choice.curvature_filter;
     options.check_crossing_point_curvature = choice.check_crossing_point_curvature;
@@ -328,6 +364,8 @@ int run_ellipsoid_example(int argc, char* argv[], bool linearity_example) try {
               << surface.vertices.size() - surface.dual_vertex_count << " polygon centers, "
               << (polygon_faces ? surface.ridge_polygons.size() : surface.ridge_triangles.size())
               << (polygon_faces ? " polygons\n" : " triangles\n")
+              << "parallel initial sampling: " << (choice.parallel_initial_sampling ? "enabled" : "disabled")
+              << ", parallel edge crossings: " << (choice.parallel_edge_crossings ? "enabled" : "disabled") << '\n'
               << "wrote " << choice.filename << '\n';
     if (choice.adaptive) {
         std::cout << "actual edge splits: " << grid.get_num_vertices() - initial_vertex_count
