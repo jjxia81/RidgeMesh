@@ -31,7 +31,7 @@ struct OutputChoice {
     bool help = false;
     double absolute_tolerance = 0.1;
     ridge_surface::LinearitySampling sampling = ridge_surface::LinearitySampling::cubic_16;
-    int max_splits = 100'000;
+    int max_splits = 10'000'000;
     double minimum_edge_length = 0.005;
     bool refine_orientation_boundary = false;
     bool refine_curvature_boundary = false;
@@ -59,7 +59,7 @@ void print_usage(bool linearity_example) {
               << "  [--check-crossing-point-curvature]\n"
               << "  [--enable-boundary-i] [--enable-boundary-ii]\n"
               << "  [--disable-boundary-i] [--disable-boundary-ii]\n"
-              << "defaults: tolerance=0.1, sampling=cubic_16, max-splits=100000, "
+              << "defaults: tolerance=0.1, sampling=cubic_16, max-splits=10000000, "
                  "minimum-edge-length=0.005; pipeline=bezier_simplex (intrinsic Boundary I/II checks); "
                  "curvature filter=crossing_point; surfacing step 3 disabled\n";
 }

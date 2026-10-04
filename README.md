@@ -322,7 +322,8 @@ In Python set `options.ridge_curvature_filter = rs.RidgeCurvatureFilter.crossing
 in C++ use `RidgeCurvatureFilter::crossing_point`.
 Use `--linearity-sampling face_centers_5` for the cheaper test, `--max-splits`
 and `--minimum-edge-length` for the stopping limits, and `--help` for all options.
-Defaults remain 100000 splits, a 0.005 edge cutoff, and `cubic_16` sampling;
+The ellipsoid examples default to 10000000 splits, a 0.005 edge cutoff, and
+`cubic_16` sampling; large runs may consume substantial memory and disk space.
 relative tolerance is zero. This example writes `ellipsoid_linearity_ridge.ply`
 and `ellipsoid_linearity_grid_wireframe.ply` in the current directory, separate
 from the original example's output names. Each rerun replaces these files.
