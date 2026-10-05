@@ -32,6 +32,42 @@ target_link_libraries(ridge_example PRIVATE ridge_surface)
 add_executable(ellipsoid_example examples/ellipsoid.cpp)
 target_link_libraries(ellipsoid_example PRIVATE ridge_surface)
 
+# The Wendland VIPSS example lives in the HessianVipss project.  RidgeMesh
+# supplies extraction only; the field and its analytical derivatives remain
+# owned by that project.
+add_executable(vipss_wendland_ridge
+  ../hessianVipss/examples/vipss_wendland_ridge.cpp
+  ../hessianVipss/src/kernel.cpp)
+target_include_directories(vipss_wendland_ridge PRIVATE ../hessianVipss/include)
+target_link_libraries(vipss_wendland_ridge PRIVATE ridge_surface Eigen3::Eigen)
+target_compile_features(vipss_wendland_ridge PRIVATE cxx_std_20)
+
+# The T-junction field is optimized with Ceres in HessianVipss, then RidgeMesh
+# extracts height ridges of its negated scalar function F=-f.
+set(CMAKE_SKIP_INSTALL_RULES ON CACHE BOOL "" FORCE)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(USE_CUDA OFF CACHE BOOL "" FORCE)
+set(MINIGLOG ON CACHE BOOL "" FORCE)
+set(PROVIDE_UNINSTALL_TARGET OFF CACHE BOOL "" FORCE)
+include(FetchContent)
+FetchContent_Declare(
+  ceres
+  GIT_REPOSITORY https://github.com/ceres-solver/ceres-solver.git
+  GIT_TAG 2.2.0
+  GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(ceres)
+
+add_executable(vipss_t_junction_ridge
+  ../hessianVipss/examples/t_junction_ridge.cpp
+  ../hessianVipss/src/second_order_hrbf.cpp
+  ../hessianVipss/src/kernel.cpp
+  ../hessianVipss/src/soft_vipss.cpp)
+target_include_directories(vipss_t_junction_ridge PRIVATE ../hessianVipss/include)
+target_link_libraries(vipss_t_junction_ridge PRIVATE ridge_surface Eigen3::Eigen Ceres::ceres)
+target_compile_features(vipss_t_junction_ridge PRIVATE cxx_std_20)
+
 add_executable(ellipsoid_linearity_example examples/ellipsoid_linearity.cpp examples/ellipsoid.cpp)
 target_compile_definitions(ellipsoid_linearity_example PRIVATE RIDGE_ELLIPSOID_NO_MAIN)
 target_link_libraries(ellipsoid_linearity_example PRIVATE ridge_surface)
@@ -82,7 +118,8 @@ if(RIDGE_SURFACE_BUILD_PYTHON)
 endif()
 
 if(WIN32)
-  set(ridge_runtime_targets ridge_example ridge_test ellipsoid_example ellipsoid_linearity_example)
+  set(ridge_runtime_targets ridge_example ridge_test ellipsoid_example ellipsoid_linearity_example
+                            vipss_wendland_ridge vipss_t_junction_ridge)
   if(RIDGE_SURFACE_BUILD_PYTHON)
     list(APPEND ridge_runtime_targets ridge_surface_python)
   endif()
