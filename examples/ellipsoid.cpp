@@ -40,7 +40,7 @@ struct OutputChoice {
     bool refine_orientation_boundary = false;
     bool refine_curvature_boundary = false;
     bool check_crossing_point_curvature = false;
-    ridge_surface::RidgeCurvatureFilter curvature_filter = ridge_surface::RidgeCurvatureFilter::crossing_point;
+    ridge_surface::RidgeCurvatureFilter curvature_filter = ridge_surface::RidgeCurvatureFilter::both_endpoints;
 };
 
 double nonnegative_number(const std::string& text, const char* option) {
@@ -68,7 +68,7 @@ void print_usage(bool linearity_example) {
               << "--res sets cells per axis for uniform runs only (default: 64)\n"
               << "defaults: tolerance=0.1, sampling=cubic_16, max-splits=10000000, "
                  "minimum-edge-length=0.005; pipeline=bezier_simplex (intrinsic Boundary I/II checks); "
-                 "curvature filter=crossing_point; surfacing step 3 disabled; "
+                 "curvature filter=both_endpoints; surfacing step 3 disabled; "
                  "parallel initial sampling and edge crossings enabled\n";
 }
 

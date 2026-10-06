@@ -16,8 +16,8 @@ int main() try {
       default_refinement.linearity_absolute_tolerance != 0.1) {
     throw std::runtime_error("boundary and linearity defaults are incorrect");
   }
-  if (SurfaceOptions{}.ridge_curvature_filter != RidgeCurvatureFilter::crossing_point) {
-    throw std::runtime_error("crossing-point curvature filter is not the default");
+  if (SurfaceOptions{}.ridge_curvature_filter != RidgeCurvatureFilter::both_endpoints) {
+    throw std::runtime_error("both-endpoint curvature filter is not the default");
   }
   if (SurfaceOptions{}.check_crossing_point_curvature) {
     throw std::runtime_error("crossing-point curvature step 3 should default to disabled");
@@ -40,11 +40,16 @@ int main() try {
   curvature_options.nx = 1;
   curvature_options.ny = curvature_options.nz = 2;
   curvature_options.surface_target = RefinementTarget::ridges;
-  curvature_options.ridge_curvature_filter = RidgeCurvatureFilter::both_endpoints;
+  // The default must reject this edge because only one endpoint passes k1+k3 > 0.
   const Bounds3D curvature_bounds{{-1, -1, -1}, {1, 1, 1}};
   if (!extract_height_ridges(crossing_curvature_field, curvature_bounds, curvature_options).vertices.empty()) {
     throw std::runtime_error("original both-endpoint curvature filtering changed");
   }
+  curvature_options.minimum_curvature_sum = -10.0;
+  if (!extract_height_ridges(crossing_curvature_field, curvature_bounds, curvature_options).vertices.empty()) {
+    throw std::runtime_error("negative curvature threshold admitted a nonpositive ridge endpoint");
+  }
+  curvature_options.minimum_curvature_sum = 0.0;
   curvature_options.ridge_curvature_filter = RidgeCurvatureFilter::crossing_point;
   for (const bool refine_roots : {true, false}) {
     curvature_options.subdivide_roots = refine_roots;

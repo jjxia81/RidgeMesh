@@ -348,13 +348,14 @@ SurfaceMesh extract_height_ridges_from_grid(
         const bool extract_valleys = options.surface_target == RefinementTarget::valleys ||
             options.surface_target == RefinementTarget::ridges_and_valleys;
         const bool check_ridge_at_crossing = options.ridge_curvature_filter == RidgeCurvatureFilter::crossing_point;
+        const double ridge_endpoint_threshold = std::max(0.0, options.minimum_curvature_sum);
         const auto endpoint_passes_precheck = [](const VertexSample& sample) {
             return sample.eigensystem.values[0] + sample.eigensystem.values[1] > 0.0;
         };
         const bool ridge = extract_ridges && (check_ridge_at_crossing
             ? endpoint_passes_precheck(first_sample) || endpoint_passes_precheck(second_sample)
-            : first_sample.curvature_sum > options.minimum_curvature_sum &&
-              second_sample.curvature_sum > options.minimum_curvature_sum);
+            : first_sample.curvature_sum > ridge_endpoint_threshold &&
+              second_sample.curvature_sum > ridge_endpoint_threshold);
         const bool valley = extract_valleys &&
             first_sample.curvature_sum < -options.minimum_curvature_sum &&
             second_sample.curvature_sum < -options.minimum_curvature_sum;

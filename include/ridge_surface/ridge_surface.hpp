@@ -65,7 +65,7 @@ enum class LinearitySampling {
 };
 
 enum class RidgeCurvatureFilter {
-  both_endpoints, // require k1+k3 > threshold at both endpoints (original)
+  both_endpoints, // require k1+k3 > max(0, threshold) at both endpoints
   crossing_point, // either endpoint k1+k2 > 0; optional curvature check at root
 };
 
@@ -111,11 +111,11 @@ struct SurfaceOptions {
   bool subdivide_roots = true;          // bracket-preserving root refinement
   int root_iterations = 4;
   double root_tolerance = 1e-7;
-  // For a ridge, k1 + k3 is computed from the eigenvalues of -H. Require it
-  // to exceed this value at the crossing point by default, or at both edge
-  // endpoints with the original filter. Zero is a sign-only threshold.
+  // For a ridge, k1 + k3 is computed from the eigenvalues of -H. By default,
+  // require it to exceed max(0, this value) at both edge endpoints. Zero
+  // is a sign-only threshold; negative values cannot admit nonpositive ridges.
   double minimum_curvature_sum = 0.0;
-  RidgeCurvatureFilter ridge_curvature_filter = RidgeCurvatureFilter::crossing_point;
+  RidgeCurvatureFilter ridge_curvature_filter = RidgeCurvatureFilter::both_endpoints;
   bool check_crossing_point_curvature = false; // optional step 3; crossing_point mode only
   // If finite, a ridge crossing must have f(x) >= this value. This removes
   // local but low-valued ridges when extracting a particular level surface.

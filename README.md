@@ -327,20 +327,21 @@ On Ubuntu build the same CMake target and run
 `./build/ellipsoid_linearity_example --le 0.01`.
 The original `--linearity-absolute-tolerance` spelling remains accepted as an alias.
 The default filter during **surfacing only** is
-`--ridge-curvature-filter crossing_point` (the flag may be omitted). Either endpoint must satisfy
-`k1+k2 > 0` before testing the oriented directional crossing; the Hessian is
-optionally re-evaluated at that crossing to require `k1+k3 > minimum_curvature_sum`.
-This step 3 is disabled by default (`check_crossing_point_curvature = false`).
-Enable it with `--check-crossing-point-curvature`, or set
-`options.check_crossing_point_curvature = True` in Python (`true` in C++).
-With step 3 off, accepted directional crossings are not checked for root curvature;
-they are not guaranteed to be normal-direction maxima. Endpoint prechecking and
-any configured field-value filter still apply. The curvature-strength threshold
-still affects adaptive eligibility and the original `both_endpoints` mode.
-Select `--ridge-curvature-filter both_endpoints` to restore the original filter. This changes neither
-adaptive eligibility nor valley filtering and does not guarantee watertightness.
-The crossing-point example mesh gets a `_crossing_point` suffix for comparison.
-In Python set `options.ridge_curvature_filter = rs.RidgeCurvatureFilter.crossing_point`;
+`--ridge-curvature-filter both_endpoints` (the flag may be omitted). Before
+testing an oriented directional crossing, **both** edge endpoints must satisfy
+`k1+k3 > max(0, minimum_curvature_sum)`, using eigenvalues of `-H`. The default
+threshold is zero, and a negative strength setting cannot admit a nonpositive
+ridge endpoint. This changes neither adaptive eligibility nor valley
+filtering and does not guarantee watertightness; on a coarse grid, the strict
+endpoint condition can miss a ridge between the endpoints.
+
+The optional `--ridge-curvature-filter crossing_point` instead requires
+`k1+k2 > 0` at either endpoint. With
+`--check-crossing-point-curvature`, it also evaluates the Hessian at the root
+and requires `k1+k3 > minimum_curvature_sum` there. Without that flag, the
+root-curvature check is disabled. The crossing-point example mesh gets a
+`_crossing_point` suffix for comparison. In Python set
+`options.ridge_curvature_filter = rs.RidgeCurvatureFilter.crossing_point`;
 in C++ use `RidgeCurvatureFilter::crossing_point`.
 Use `--linearity-sampling face_centers_5` for the cheaper test, `--max-splits`
 and `--minimum-edge-length` for the stopping limits, and `--help` for all options.
@@ -440,14 +441,14 @@ wireframe.
 
 `ellipsoid_example` is a separate analytic example for
 \(F(x) = -(x^2/a^2 + y^2/b^2 + z^2/c^2 - 1)^2\). It writes
-`ellipsoid_ridge_crossing_point.ply`, a uniform 64-cells-per-axis ridge mesh for a flattened sphere
+`ellipsoid_ridge.ply`, a uniform 64-cells-per-axis ridge mesh for a flattened sphere
 with semi-axes \(a=b=0.75\) and \(c=0.25\). It uses the default center-fan
 triangulation. Run `ellipsoid_example --res 128` for a uniform 128-cells-per-axis
-grid; this writes `ellipsoid_ridge_res128_crossing_point.ply` and requires
+grid; this writes `ellipsoid_ridge_res128.ply` and requires
 substantially more time and memory than the default. `--res` is for uniform
 runs only. Run `ellipsoid_example --adaptive` to start instead from a
 `4 x 4 x 4` MTet grid and apply up to 10,000,000 longest-edge splits around the
-ridge. That run writes `ellipsoid_adaptive_ridge_crossing_point.ply` and
+ridge. That run writes `ellipsoid_adaptive_ridge.ply` and
 `ellipsoid_adaptive_grid_wireframe.ply`; the latter shows the refined grid edges.
 Set
 `SurfaceOptions::retain_dual_polygons` to access the ordered dual-vertex rings
