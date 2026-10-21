@@ -6,6 +6,7 @@
 #include <nanothread/nanothread.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <limits>
@@ -264,7 +265,9 @@ Vec3 axis_step(int axis, double step) {
 SurfaceMesh extract_height_ridges_from_grid(
     const DifferentialField3D& field,
     mtet::MTetMesh& coarse_grid,
-    const SurfaceOptions& options) {
+    const SurfaceOptions& options,
+    ExtractionTimings* timings) {
+    if (timings) *timings = {};
     if (!field.gradient || !field.hessian || coarse_grid.get_num_vertices() == 0 ||
         coarse_grid.get_num_tets() == 0 ||
         options.longest_edge_refinement.max_splits < 0 ||
@@ -275,7 +278,10 @@ SurfaceMesh extract_height_ridges_from_grid(
         options.longest_edge_refinement.linearity_absolute_tolerance < 0.0 ||
         !std::isfinite(options.longest_edge_refinement.linearity_absolute_tolerance) ||
         options.longest_edge_refinement.linearity_relative_tolerance < 0.0 ||
-        !std::isfinite(options.longest_edge_refinement.linearity_relative_tolerance)) {
+        !std::isfinite(options.longest_edge_refinement.linearity_relative_tolerance) ||
+        options.longest_edge_refinement.eigenvector_variation_angle < 0.0 ||
+        options.longest_edge_refinement.eigenvector_variation_angle > 0.5 * std::acos(-1.0) ||
+        !std::isfinite(options.longest_edge_refinement.eigenvector_variation_angle)) {
         throw std::invalid_argument("valid field and non-empty MTet grid required");
     }
     if (std::isfinite(options.minimum_ridge_field_value) && !field.value) {
@@ -283,6 +289,7 @@ SurfaceMesh extract_height_ridges_from_grid(
     }
 
     // 1. Evaluate derivatives and classify each grid vertex.
+    const auto sampling_start = std::chrono::steady_clock::now();
     std::unordered_map<std::uint64_t, VertexSample> samples_by_vertex_id;
     samples_by_vertex_id.reserve(coarse_grid.get_num_vertices());
     if (options.parallel_initial_sampling) {
@@ -324,14 +331,24 @@ SurfaceMesh extract_height_ridges_from_grid(
                 evaluate_vertex_sample(field, {position[0], position[1], position[2]}));
         });
     }
+    if (timings) {
+        timings->initial_grid_sampling_seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - sampling_start).count();
+    }
 
     // 2. Adapt the coarse MTet grid before locating surface crossings.
     // MTet splits the entire edge one-ring, preserving a conforming tet mesh.
+    const auto refinement_start = std::chrono::steady_clock::now();
     refine_longest_edges_in_place(
         coarse_grid, field, options.longest_edge_refinement, samples_by_vertex_id,
         options.minimum_curvature_sum);
+    if (timings) {
+        timings->grid_refinement_seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - refinement_start).count();
+    }
 
     // 3. Locate eligible ridge and valley crossings on grid edges.
+    const auto surface_start = std::chrono::steady_clock::now();
     const std::size_t tet_count = coarse_grid.get_num_tets();
     std::vector<Vec3> crossing_sum_by_tet(tet_count);
     std::vector<int> crossing_count_by_tet(tet_count);
@@ -463,31 +480,38 @@ SurfaceMesh extract_height_ridges_from_grid(
         options.polygon_triangulation,
         retain_polygons ? &surface.valley_polygons : nullptr,
         surface.valley_triangles);
+    if (timings) {
+        timings->final_surface_seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - surface_start).count();
+    }
     return surface;
 }
 
 SurfaceMesh extract_height_ridges(
     const DifferentialField3D& field,
     const Bounds3D& bounds,
-    const SurfaceOptions& options) {
+    const SurfaceOptions& options,
+    ExtractionTimings* timings) {
     if (options.nx < 1 || options.ny < 1 || options.nz < 1) {
         throw std::invalid_argument("positive coarse-grid resolution required");
     }
     mtet::MTetMesh coarse_grid = make_kuhn_grid(bounds, options.nx, options.ny, options.nz);
-    return extract_height_ridges_from_grid(field, coarse_grid, options);
+    return extract_height_ridges_from_grid(field, coarse_grid, options, timings);
 }
 
 SurfaceMesh extract_height_ridges(
     const DifferentialField3D& field,
     mtet::MTetMesh& coarse_grid,
-    const SurfaceOptions& options) {
-    return extract_height_ridges_from_grid(field, coarse_grid, options);
+    const SurfaceOptions& options,
+    ExtractionTimings* timings) {
+    return extract_height_ridges_from_grid(field, coarse_grid, options, timings);
 }
 
 SurfaceMesh extract_height_ridges(
     const ScalarField3D& scalar_field,
     const Bounds3D& bounds,
-    const SurfaceOptions& options) {
+    const SurfaceOptions& options,
+    ExtractionTimings* timings) {
     if (!scalar_field) {
         throw std::invalid_argument("field callback is required");
     }
@@ -524,7 +548,7 @@ SurfaceMesh extract_height_ridges(
         return hessian;
     };
 
-    return extract_height_ridges(field, bounds, options);
+    return extract_height_ridges(field, bounds, options, timings);
 }
 
 } // namespace ridge_surface

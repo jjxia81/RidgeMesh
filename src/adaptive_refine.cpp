@@ -1,11 +1,15 @@
 #include "adaptive_refine.hpp"
 
 #include <Eigen/Eigenvalues>
+#include <nanothread/nanothread.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <exception>
+#include <functional>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <span>
@@ -70,6 +74,54 @@ struct RefinementCandidate {
     std::uint8_t longest_local_edge;
     double longest_edge_length;
 };
+
+// The Bezier-simplex predicate uses points shared by neighboring tetrahedra:
+// two trisection points on every edge and one center on every triangular face.
+// Cache those by their vertex IDs so a point is evaluated only once, even when
+// several candidate tetrahedra reference it.
+struct BezierSampleKey {
+    std::array<std::uint64_t, 3> vertices{};
+    std::uint8_t kind = 0; // 1/2: (2*a+b)/3 or (a+2*b)/3; 3: face center
+
+    bool operator==(const BezierSampleKey&) const = default;
+};
+
+struct BezierSampleKeyHash {
+    std::size_t operator()(const BezierSampleKey& key) const noexcept {
+        std::size_t result = key.kind;
+        for (const std::uint64_t vertex : key.vertices)
+            result ^= std::hash<std::uint64_t>{}(vertex) + 0x9e3779b9 + (result << 6) + (result >> 2);
+        return result;
+    }
+};
+
+using BezierSampleCache = std::unordered_map<BezierSampleKey, VertexSample, BezierSampleKeyHash>;
+
+BezierSampleKey edge_third_key(mtet::VertexId first, mtet::VertexId second, std::uint8_t kind) {
+    std::uint64_t low = first.value_of();
+    std::uint64_t high = second.value_of();
+    if (low > high) {
+        std::swap(low, high);
+        // Keep the physical point unchanged after canonicalizing the edge.
+        kind = kind == 1 ? 2 : 1;
+    }
+    return {{low, high, 0}, kind};
+}
+
+BezierSampleKey face_center_key(mtet::VertexId first, mtet::VertexId second, mtet::VertexId third) {
+    std::array<std::uint64_t, 3> vertices{first.value_of(), second.value_of(), third.value_of()};
+    std::sort(vertices.begin(), vertices.end());
+    return {vertices, 3};
+}
+
+Vec3 position_for_bezier_key(const mtet::MTetMesh& mesh, const BezierSampleKey& key) {
+    const auto first = position_of(mesh, mtet::VertexId(key.vertices[0]));
+    const auto second = position_of(mesh, mtet::VertexId(key.vertices[1]));
+    if (key.kind == 1) return (2.0 * first + second) / 3.0;
+    if (key.kind == 2) return (first + 2.0 * second) / 3.0;
+    const auto third = position_of(mesh, mtet::VertexId(key.vertices[2]));
+    return (first + second + third) / 3.0;
+}
 
 struct LongestCandidateFirst {
     bool operator()(const RefinementCandidate& left, const RefinementCandidate& right) const {
@@ -145,6 +197,42 @@ bool has_edge_condition_crossing(
         }
     }
     return false;
+}
+
+bool eigenvectors_exceed_variation(
+    std::span<const VertexSample> samples, int direction_index, double angle_limit) {
+    // Average axes rather than signed eigenvectors: v and -v contribute the
+    // same outer product. The dominant eigenvector of this scatter matrix is
+    // the local mean direction without any manual sign synchronization.
+    Eigen::Matrix3d scatter = Eigen::Matrix3d::Zero();
+    for (const VertexSample& sample : samples) {
+        const Vec3& direction = sample.eigensystem.vectors[direction_index];
+        const Eigen::Vector3d v(direction.x, direction.y, direction.z);
+        scatter.noalias() += v * v.transpose();
+    }
+    const Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(scatter);
+    if (solver.info() != Eigen::Success)
+        throw std::runtime_error("eigenvector-variation mean-axis solve failed");
+    const Eigen::Vector3d mean_axis = solver.eigenvectors().col(2);
+    const double cosine_limit = std::cos(angle_limit);
+    for (const VertexSample& sample : samples) {
+        const Vec3& direction = sample.eigensystem.vectors[direction_index];
+        const double alignment = std::abs(
+            direction.x * mean_axis.x() + direction.y * mean_axis.y() + direction.z * mean_axis.z());
+        // acos(alignment) > angle_limit iff alignment < cos(angle_limit).
+        if (alignment < cosine_limit) return true;
+    }
+    return false;
+}
+
+bool tet_eigenvectors_exceed_variation(
+    std::span<const mtet::VertexId, 4> tet_vertices,
+    const std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id,
+    int direction_index, double angle_limit) {
+    std::array<VertexSample, 4> samples;
+    for (std::size_t index = 0; index < samples.size(); ++index)
+        samples[index] = samples_by_vertex_id.at(tet_vertices[index].value_of());
+    return eigenvectors_exceed_variation(samples, direction_index, angle_limit);
 }
 
 bool should_refine_tet_legacy(
@@ -298,22 +386,26 @@ bool should_refine_bezier_simplex(
     const DifferentialField3D& field,
     std::span<const mtet::VertexId, 4> tet_vertices,
     const std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id,
+    const BezierSampleCache& bezier_samples,
     const LongestEdgeRefinementOptions& options) {
-    // These are re-evaluated samples at cubic barycentric locations, not
-    // Bernstein coefficients. Cache all 20 for this tet's decision only.
-    const auto weights = cubic_sample_weights();
-    std::array<Vec3, 4> positions;
+    // These are sampled values at cubic barycentric locations, not Bernstein
+    // coefficients. Their edge/face keys are shared across adjacent tets.
     std::array<VertexSample, 20> samples;
     for (std::size_t index = 0; index < 4; ++index) {
-        positions[index] = position_of(mesh, tet_vertices[index]);
         samples[index] = samples_by_vertex_id.at(tet_vertices[index].value_of());
     }
-    for (std::size_t index = 0; index < weights.size(); ++index) {
-        Vec3 point{};
-        for (std::size_t vertex = 0; vertex < 4; ++vertex) {
-            point += positions[vertex] * weights[index][vertex];
-        }
-        samples[index + 4] = evaluate_vertex_sample(field, point);
+    std::size_t sample_index = 4;
+    for (std::size_t first = 0; first < 4; ++first)
+        for (std::size_t second = 0; second < 4; ++second)
+            if (first != second)
+                samples[sample_index++] = bezier_samples.at(
+                    edge_third_key(tet_vertices[first], tet_vertices[second], 1));
+    for (std::size_t opposite = 0; opposite < 4; ++opposite) {
+        std::array<mtet::VertexId, 3> face;
+        std::size_t face_index = 0;
+        for (std::size_t vertex = 0; vertex < 4; ++vertex)
+            if (vertex != opposite) face[face_index++] = tet_vertices[vertex];
+        samples[sample_index++] = bezier_samples.at(face_center_key(face[0], face[1], face[2]));
     }
 
     const auto selected_surface_needs_refinement = [&](bool ridge) {
@@ -345,8 +437,20 @@ bool should_refine_bezier_simplex(
         if (!tet_directions_are_orientable(tet_vertices, samples_by_vertex_id, direction_index)) {
             return true;
         }
-        // 5. Linearity comes last. Reuse the 16 samples already evaluated.
+        // 5. The selected final gate decides whether this eligible tet needs
+        // refinement. Eigenvector variation is evaluated on the actual tet
+        // vertices and is therefore independent of the interior samples.
+        const bool use_linearity = options.refinement_gate == RefinementGate::linearity ||
+                                   options.refinement_gate == RefinementGate::either;
+        const bool use_eigenvector_variation =
+            options.refinement_gate == RefinementGate::eigenvector_variation ||
+            options.refinement_gate == RefinementGate::either;
+        const bool eigenvector_varies = use_eigenvector_variation &&
+            eigenvectors_exceed_variation(samples, direction_index,
+                                          options.eigenvector_variation_angle);
+        if (!use_linearity) return eigenvector_varies;
         if (options.linearity_sampling == LinearitySampling::disabled) return true;
+        // Linearity reuses the 16 samples already evaluated.
         const Vec3 reference = samples[0].eigensystem.vectors[direction_index];
         const auto condition_value = [&](const VertexSample& sample) {
             Vec3 direction = sample.eigensystem.vectors[direction_index];
@@ -372,16 +476,20 @@ bool should_refine_bezier_simplex(
             error.maximum_difference = std::max(error.maximum_difference, std::abs(actual_value - linear_value));
             error.maximum_absolute_value = std::max(error.maximum_absolute_value, std::abs(actual_value));
         };
+        const auto weights = cubic_sample_weights();
         const std::size_t first_sample = options.linearity_sampling == LinearitySampling::face_centers_5 ? 12 : 0;
-        for (std::size_t index = first_sample; index < weights.size(); ++index) {
+        for (std::size_t index = first_sample; index < weights.size(); ++index)
             compare(samples[index + 4], weights[index]);
-        }
         if (options.linearity_sampling == LinearitySampling::face_centers_5) {
-            const Vec3 center = (positions[0] + positions[1] + positions[2] + positions[3]) / 4.0;
+            // The tetrahedron center is not shared, and is used only by this
+            // optional five-point linearity variant.
+            Vec3 center{};
+            for (const mtet::VertexId vertex : tet_vertices) center += position_of(mesh, vertex);
             compare(evaluate_vertex_sample(field, center), {.25, .25, .25, .25});
         }
-        return error.maximum_difference > options.linearity_absolute_tolerance +
+        const bool non_linear = error.maximum_difference > options.linearity_absolute_tolerance +
             options.linearity_relative_tolerance * error.maximum_absolute_value;
+        return non_linear || eigenvector_varies;
     };
     const bool ridges = options.target == RefinementTarget::ridges ||
                         options.target == RefinementTarget::ridges_and_valleys;
@@ -396,6 +504,7 @@ bool should_refine_tet(
     const DifferentialField3D& field,
     std::span<const mtet::VertexId, 4> tet_vertices,
     const std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id,
+    const BezierSampleCache& bezier_samples,
     const LongestEdgeRefinementOptions& options,
     double minimum_curvature_sum) {
     if (options.pipeline == RefinementPipeline::legacy_crossing) {
@@ -407,7 +516,7 @@ bool should_refine_tet(
     }
 
     if (options.pipeline == RefinementPipeline::bezier_simplex) {
-        return should_refine_bezier_simplex(mesh, field, tet_vertices, samples_by_vertex_id, options);
+        return should_refine_bezier_simplex(mesh, field, tet_vertices, samples_by_vertex_id, bezier_samples, options);
     }
 
     bool all_positive = true;
@@ -456,9 +565,17 @@ bool should_refine_tet(
         if (!crossing) {
             return false;
         }
-        if (options.linearity_sampling == LinearitySampling::disabled) {
-            return true;
-        }
+        const bool use_linearity = options.refinement_gate == RefinementGate::linearity ||
+                                   options.refinement_gate == RefinementGate::either;
+        const bool use_eigenvector_variation =
+            options.refinement_gate == RefinementGate::eigenvector_variation ||
+            options.refinement_gate == RefinementGate::either;
+        const bool eigenvector_varies = use_eigenvector_variation &&
+            tet_eigenvectors_exceed_variation(tet_vertices, samples_by_vertex_id,
+                                               direction_index,
+                                               options.eigenvector_variation_angle);
+        if (!use_linearity) return eigenvector_varies;
+        if (options.linearity_sampling == LinearitySampling::disabled) return true;
 
         std::array<Vec3, 4> positions;
         std::array<const VertexSample*, 4> samples;
@@ -470,7 +587,7 @@ bool should_refine_tet(
             field, positions, samples, direction_index, options.linearity_sampling);
         const double tolerance = options.linearity_absolute_tolerance +
             options.linearity_relative_tolerance * error.maximum_absolute_value;
-        return error.maximum_difference > tolerance;
+        return error.maximum_difference > tolerance || eigenvector_varies;
     };
     return (wants_ridges && !all_negative && needs_direction_refinement(
                 0, curvature_boundary ? any_ridge_is_strong : ridge_is_strong)) ||
@@ -479,12 +596,8 @@ bool should_refine_tet(
 }
 
 std::optional<RefinementCandidate> make_refinement_candidate(
-    const mtet::MTetMesh& mesh,
-    const DifferentialField3D& field,
-    mtet::TetId tet_id,
-    const std::unordered_map<std::uint64_t, VertexSample>& samples_by_vertex_id,
-    const LongestEdgeRefinementOptions& options,
-    double minimum_curvature_sum) {
+    const mtet::MTetMesh& mesh, mtet::TetId tet_id,
+    const LongestEdgeRefinementOptions& options) {
     constexpr std::array<std::array<int, 2>, 6> kLocalEdges{{
         {{0, 1}}, {{1, 2}}, {{2, 0}}, {{0, 3}}, {{1, 3}}, {{2, 3}},
     }};
@@ -499,11 +612,9 @@ std::optional<RefinementCandidate> make_refinement_candidate(
             candidate.longest_local_edge = edge_index;
         }
     }
-    // Avoid all additional derivative queries for already-small tetrahedra.
-    if (candidate.longest_edge_length <= options.minimum_edge_length ||
-        !should_refine_tet(mesh, field, tet_vertices, samples_by_vertex_id, options, minimum_curvature_sum)) {
-        return std::nullopt;
-    }
+    // Classification is deferred until a batch has collected and evaluated all
+    // shared Bezier edge/face samples in parallel.
+    if (candidate.longest_edge_length <= options.minimum_edge_length) return std::nullopt;
     return candidate;
 }
 
@@ -535,26 +646,20 @@ int refine_longest_edges_in_place(
         return 0;
     }
 
-    // The ordered set is a max-priority queue with efficient removal by tet ID.
-    // A split replaces only the tets around its edge, so all other candidates
-    // remain valid and never need to be scanned again.
+    // The ordered set is a max-priority queue of tetrahedra awaiting
+    // classification. We classify bounded batches only after their shared
+    // Bezier samples have been evaluated and cached.
     using CandidateQueue = std::set<RefinementCandidate, LongestCandidateFirst>;
     CandidateQueue candidates;
     std::unordered_map<std::uint64_t, CandidateQueue::iterator> candidate_by_tet;
-
-    // MTet's edge-ring traversal may return tagged tetrahedron handles.
-    // Strip the tag before using a handle as a queue identity.
-    const auto canonical_tet = [&](mtet::TetId tet_id) {
-        return mesh.get_edge_tet(mesh.get_edge(tet_id, 0));
-    };
+    BezierSampleCache bezier_samples;
 
     const auto enqueue_if_eligible = [&](mtet::TetId tet_id) {
-        tet_id = canonical_tet(tet_id);
+        if (!mesh.has_tet(tet_id)) return;
         if (candidate_by_tet.contains(tet_id.value_of())) {
             return;
         }
-        const auto candidate = make_refinement_candidate(
-            mesh, field, tet_id, samples_by_vertex_id, options, minimum_curvature_sum);
+        const auto candidate = make_refinement_candidate(mesh, tet_id, options);
         if (!candidate || candidate->longest_edge_length <= options.minimum_edge_length) {
             return;
         }
@@ -565,7 +670,6 @@ int refine_longest_edges_in_place(
     };
 
     const auto remove_candidate = [&](mtet::TetId tet_id) {
-        tet_id = canonical_tet(tet_id);
         const auto entry = candidate_by_tet.find(tet_id.value_of());
         if (entry != candidate_by_tet.end()) {
             candidates.erase(entry->second);
@@ -577,25 +681,107 @@ int refine_longest_edges_in_place(
         enqueue_if_eligible(tet_id);
     });
 
+    const auto add_bezier_key = [&](const BezierSampleKey& key,
+                                    std::unordered_map<BezierSampleKey, Vec3, BezierSampleKeyHash>& missing) {
+        if (!bezier_samples.contains(key)) missing.try_emplace(key, position_for_bezier_key(mesh, key));
+    };
+    const auto collect_bezier_samples = [&](const std::vector<RefinementCandidate>& batch) {
+        std::unordered_map<BezierSampleKey, Vec3, BezierSampleKeyHash> missing;
+        for (const RefinementCandidate& candidate : batch) {
+            if (!mesh.has_tet(candidate.tet_id)) continue;
+            const auto vertices = mesh.get_tet(candidate.tet_id);
+            for (std::size_t first = 0; first < 4; ++first)
+                for (std::size_t second = first + 1; second < 4; ++second) {
+                    add_bezier_key(edge_third_key(vertices[first], vertices[second], 1), missing);
+                    add_bezier_key(edge_third_key(vertices[first], vertices[second], 2), missing);
+                }
+            for (std::size_t opposite = 0; opposite < 4; ++opposite) {
+                std::array<mtet::VertexId, 3> face;
+                std::size_t face_index = 0;
+                for (std::size_t vertex = 0; vertex < 4; ++vertex)
+                    if (vertex != opposite) face[face_index++] = vertices[vertex];
+                add_bezier_key(face_center_key(face[0], face[1], face[2]), missing);
+            }
+        }
+        std::vector<std::pair<BezierSampleKey, Vec3>> requests;
+        requests.reserve(missing.size());
+        for (const auto& request : missing) requests.push_back(request);
+        std::vector<VertexSample> evaluated(requests.size());
+        std::exception_ptr evaluation_error;
+        std::mutex error_mutex;
+        drjit::parallel_for(drjit::blocked_range<std::size_t>(0, requests.size(), 1),
+            [&](drjit::blocked_range<std::size_t> range) {
+                for (std::size_t index = range.begin(); index != range.end(); ++index) {
+                    try { evaluated[index] = evaluate_vertex_sample(field, requests[index].second); }
+                    catch (...) { std::lock_guard lock(error_mutex); if (!evaluation_error) evaluation_error = std::current_exception(); }
+                }
+            });
+        if (evaluation_error) std::rethrow_exception(evaluation_error);
+        for (std::size_t index = 0; index < requests.size(); ++index)
+            bezier_samples.emplace(requests[index].first, evaluated[index]);
+    };
+
     int split_count = 0;
     while (split_count < options.max_splits && !candidates.empty()) {
-        const RefinementCandidate candidate = *candidates.begin();
-        const mtet::EdgeId edge_id = mesh.get_edge(candidate.tet_id, candidate.longest_local_edge);
-
-        std::vector<mtet::TetId> replaced_tets;
-        mesh.foreach_tet_around_edge(edge_id, [&](mtet::TetId tet_id) {
-            replaced_tets.push_back(tet_id);
-        });
-        for (const mtet::TetId tet_id : replaced_tets) {
-            remove_candidate(tet_id);
+        constexpr std::size_t kBatchSize = 512;
+        std::vector<RefinementCandidate> batch;
+        batch.reserve(kBatchSize);
+        while (!candidates.empty() && batch.size() < kBatchSize) {
+            const RefinementCandidate candidate = *candidates.begin();
+            candidate_by_tet.erase(candidate.tet_id.value_of());
+            candidates.erase(candidates.begin());
+            batch.push_back(candidate);
         }
+        if (options.pipeline == RefinementPipeline::bezier_simplex) collect_bezier_samples(batch);
 
-        const auto [new_vertex_id, first_half_edge, second_half_edge] = mesh.split_edge(edge_id);
-        add_vertex_sample(mesh, field, new_vertex_id, samples_by_vertex_id);
+        std::vector<bool> marked(batch.size(), false);
+        std::exception_ptr classification_error;
+        std::mutex error_mutex;
+        drjit::parallel_for(drjit::blocked_range<std::size_t>(0, batch.size(), 1),
+            [&](drjit::blocked_range<std::size_t> range) {
+                for (std::size_t index = range.begin(); index != range.end(); ++index) {
+                    try {
+                        const RefinementCandidate& candidate = batch[index];
+                        if (!mesh.has_tet(candidate.tet_id)) continue;
+                        marked[index] = should_refine_tet(
+                            mesh, field, mesh.get_tet(candidate.tet_id), samples_by_vertex_id,
+                            bezier_samples, options, minimum_curvature_sum);
+                    } catch (...) {
+                        std::lock_guard lock(error_mutex);
+                        if (!classification_error) classification_error = std::current_exception();
+                    }
+                }
+            });
+        if (classification_error) std::rethrow_exception(classification_error);
 
-        mesh.foreach_tet_around_edge(first_half_edge, enqueue_if_eligible);
-        mesh.foreach_tet_around_edge(second_half_edge, enqueue_if_eligible);
-        ++split_count;
+        std::vector<mtet::VertexId> new_vertices;
+        std::vector<mtet::TetId> affected_tets;
+        for (std::size_t index = 0; index < batch.size() && split_count < options.max_splits; ++index) {
+            if (!marked[index]) continue;
+            const RefinementCandidate& candidate = batch[index];
+            // Earlier splits in this batch can replace this tet/edge. Revalidate
+            // immediately before mutation; stale candidates are simply skipped.
+            if (!mesh.has_tet(candidate.tet_id)) continue;
+            const mtet::EdgeId edge_id = mesh.get_edge(candidate.tet_id, candidate.longest_local_edge);
+            if (!mesh.has_edge(edge_id)) continue;
+            std::vector<mtet::TetId> replaced_tets;
+            mesh.foreach_tet_around_edge(edge_id, [&](mtet::TetId tet_id) { replaced_tets.push_back(tet_id); });
+            for (const mtet::TetId tet_id : replaced_tets) remove_candidate(tet_id);
+            const auto [new_vertex_id, first_half_edge, second_half_edge] = mesh.split_edge(edge_id);
+            new_vertices.push_back(new_vertex_id);
+            mesh.foreach_tet_around_edge(first_half_edge, [&](mtet::TetId tet_id) { affected_tets.push_back(tet_id); });
+            mesh.foreach_tet_around_edge(second_half_edge, [&](mtet::TetId tet_id) { affected_tets.push_back(tet_id); });
+            ++split_count;
+        }
+        std::vector<VertexSample> new_samples(new_vertices.size());
+        drjit::parallel_for(drjit::blocked_range<std::size_t>(0, new_vertices.size(), 1),
+            [&](drjit::blocked_range<std::size_t> range) {
+                for (std::size_t index = range.begin(); index != range.end(); ++index)
+                    new_samples[index] = evaluate_vertex_sample(field, position_of(mesh, new_vertices[index]));
+            });
+        for (std::size_t index = 0; index < new_vertices.size(); ++index)
+            samples_by_vertex_id.try_emplace(new_vertices[index].value_of(), new_samples[index]);
+        for (const mtet::TetId tet_id : affected_tets) enqueue_if_eligible(tet_id);
     }
     return split_count;
 }

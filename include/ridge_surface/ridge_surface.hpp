@@ -64,6 +64,14 @@ enum class LinearitySampling {
   disabled,      // restore crossing-driven refinement without a linearity test
 };
 
+// The final adaptive-refinement gate for an otherwise eligible ridge/valley
+// tetrahedron. `linearity` preserves the historical condition-field test.
+enum class RefinementGate {
+  linearity,
+  eigenvector_variation,
+  either,
+};
+
 enum class RidgeCurvatureFilter {
   both_endpoints, // require k1+k3 > max(0, threshold) at both endpoints
   crossing_point, // either endpoint k1+k2 > 0; optional curvature check at root
@@ -83,6 +91,12 @@ struct LongestEdgeRefinementOptions {
   LinearitySampling linearity_sampling = LinearitySampling::cubic_16;
   double linearity_absolute_tolerance = 0.1;
   double linearity_relative_tolerance = 0.0;
+  // `linearity` is the existing behavior. Eigenvector variation forms a
+  // sign-invariant mean axis from the available Hessian eigenvectors, then
+  // refines when any direction exceeds this angular deviation. The angle is
+  // in radians.
+  RefinementGate refinement_gate = RefinementGate::linearity;
+  double eigenvector_variation_angle = 15.0 * 3.14159265358979323846 / 180.0;
 };
 
 // Maximum |c(sample) - sum_i weight_i*c(vertex_i)|, where c = gradient dot
@@ -138,23 +152,34 @@ struct SurfaceMesh {
   std::vector<Polygon> valley_polygons;
 };
 
+// Wall-clock stage timings for one extraction. A zero refinement time means
+// adaptive refinement was disabled or did no work.
+struct ExtractionTimings {
+  double initial_grid_sampling_seconds = 0.0;
+  double grid_refinement_seconds = 0.0;
+  double final_surface_seconds = 0.0;
+};
+
 // Extract strong height ridges and valleys, following height_ridge.nb.
 // Requires C++20 because the internal MTet connectivity dependency uses it.
 // The output is a dual mesh: one vertex per active tetrahedron.
 SurfaceMesh extract_height_ridges(const DifferentialField3D& field,
                                   const Bounds3D& bounds,
-                                  const SurfaceOptions& options = {});
+                                  const SurfaceOptions& options = {},
+                                  ExtractionTimings* timings = nullptr);
 
 // Surface an existing coarse MTet grid. When longest_edge_refinement is
 // enabled, this mesh is refined in place; MTet remains its sole owner.
 SurfaceMesh extract_height_ridges(const DifferentialField3D& field,
                                   mtet::MTetMesh& coarse_grid,
-                                  const SurfaceOptions& options = {});
+                                  const SurfaceOptions& options = {},
+                                  ExtractionTimings* timings = nullptr);
 
 // Convenience overload. Derivatives are central finite differences; provide
 // DifferentialField3D instead when analytic derivatives are available.
 SurfaceMesh extract_height_ridges(const ScalarField3D& field,
                                   const Bounds3D& bounds,
-                                  const SurfaceOptions& options = {});
+                                  const SurfaceOptions& options = {},
+                                  ExtractionTimings* timings = nullptr);
 
 } // namespace ridge_surface
