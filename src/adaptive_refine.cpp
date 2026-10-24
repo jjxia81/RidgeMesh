@@ -15,6 +15,7 @@
 #include <span>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace ridge_surface::detail {
@@ -652,6 +653,9 @@ int refine_longest_edges_in_place(
     using CandidateQueue = std::set<RefinementCandidate, LongestCandidateFirst>;
     CandidateQueue candidates;
     std::unordered_map<std::uint64_t, CandidateQueue::iterator> candidate_by_tet;
+    // These candidates are inserted by the local size-balance rule and bypass
+    // the field predicate once, so a large neighboring tet cannot be ignored.
+    std::unordered_set<std::uint64_t> balance_forced_tets;
     BezierSampleCache bezier_samples;
 
     const auto enqueue_if_eligible = [&](mtet::TetId tet_id) {
@@ -735,6 +739,9 @@ int refine_longest_edges_in_place(
         if (options.pipeline == RefinementPipeline::bezier_simplex) collect_bezier_samples(batch);
 
         std::vector<bool> marked(batch.size(), false);
+        std::vector<bool> balance_forced(batch.size(), false);
+        for (std::size_t index = 0; index < batch.size(); ++index)
+            balance_forced[index] = balance_forced_tets.erase(batch[index].tet_id.value_of()) != 0;
         std::exception_ptr classification_error;
         std::mutex error_mutex;
         drjit::parallel_for(drjit::blocked_range<std::size_t>(0, batch.size(), 1),
@@ -743,7 +750,7 @@ int refine_longest_edges_in_place(
                     try {
                         const RefinementCandidate& candidate = batch[index];
                         if (!mesh.has_tet(candidate.tet_id)) continue;
-                        marked[index] = should_refine_tet(
+                        marked[index] = balance_forced[index] || should_refine_tet(
                             mesh, field, mesh.get_tet(candidate.tet_id), samples_by_vertex_id,
                             bezier_samples, options, minimum_curvature_sum);
                     } catch (...) {
@@ -764,6 +771,24 @@ int refine_longest_edges_in_place(
             if (!mesh.has_tet(candidate.tet_id)) continue;
             const mtet::EdgeId edge_id = mesh.get_edge(candidate.tet_id, candidate.longest_local_edge);
             if (!mesh.has_edge(edge_id)) continue;
+            // Propagate refinement across E0 before it disappears. A tet
+            // incident on E0 whose own longest edge is more than 2x (by
+            // default) longer is queued as a forced balance split.
+            // A forced balance tet recursively propagates by default. In
+            // one_ring_star mode only field-marked tets seed propagation.
+            if (options.neighboring_edge_balance_ratio > 0.0 &&
+                (options.neighboring_edge_balance_propagation ==
+                     NeighborBalancePropagation::recursive || !balance_forced[index])) {
+                const double edge_length = candidate.longest_edge_length;
+                mesh.foreach_tet_around_edge(edge_id, [&](mtet::TetId neighbor_id) {
+                    const auto neighbor = make_refinement_candidate(mesh, neighbor_id, options);
+                    if (neighbor && neighbor->longest_edge_length >
+                                        options.neighboring_edge_balance_ratio * edge_length) {
+                        balance_forced_tets.insert(neighbor_id.value_of());
+                        enqueue_if_eligible(neighbor_id);
+                    }
+                });
+            }
             std::vector<mtet::TetId> replaced_tets;
             mesh.foreach_tet_around_edge(edge_id, [&](mtet::TetId tet_id) { replaced_tets.push_back(tet_id); });
             for (const mtet::TetId tet_id : replaced_tets) remove_candidate(tet_id);
@@ -782,6 +807,12 @@ int refine_longest_edges_in_place(
         for (std::size_t index = 0; index < new_vertices.size(); ++index)
             samples_by_vertex_id.try_emplace(new_vertices[index].value_of(), new_samples[index]);
         for (const mtet::TetId tet_id : affected_tets) enqueue_if_eligible(tet_id);
+        // A neighboring tet can have been in the batch before its E0 balance
+        // request arrived. Requeue it so the forced mark is seen next round.
+        for (const RefinementCandidate& candidate : batch) {
+            if (balance_forced_tets.contains(candidate.tet_id.value_of()) && mesh.has_tet(candidate.tet_id))
+                enqueue_if_eligible(candidate.tet_id);
+        }
     }
     return split_count;
 }

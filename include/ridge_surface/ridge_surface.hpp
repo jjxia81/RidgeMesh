@@ -72,6 +72,8 @@ enum class RefinementGate {
   either,
 };
 
+enum class NeighborBalancePropagation { recursive, one_ring_star };
+
 enum class RidgeCurvatureFilter {
   both_endpoints, // require k1+k3 > max(0, threshold) at both endpoints
   crossing_point, // either endpoint k1+k2 > 0; optional curvature check at root
@@ -84,6 +86,12 @@ struct LongestEdgeRefinementOptions {
   RefinementTarget target = RefinementTarget::none;
   int max_splits = 0;
   double minimum_edge_length = 0.0;
+  // Before splitting an edge E, force neighboring tetrahedra whose longest
+  // edge exceeds this multiple of |E| into the refinement queue. Zero disables
+  // this local size-balance propagation.
+  double neighboring_edge_balance_ratio = 2.0;
+  NeighborBalancePropagation neighboring_edge_balance_propagation =
+      NeighborBalancePropagation::recursive;
   RefinementPipeline pipeline = RefinementPipeline::bezier_simplex;
   double curvature_zero_tolerance = 1e-12; // new pipeline's Boundary II uncertainty band
   bool refine_curvature_boundary = false; // optional Boundary II trigger; new pipeline only
