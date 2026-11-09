@@ -187,17 +187,60 @@ bool find_refined_crossing(
     return true;
 }
 
+std::vector<bool> find_nonmanifold_tetrahedra(const std::vector<CrossingEdge>& crossing_edges,
+                                             std::size_t tet_count) {
+    using DualEdge = std::pair<std::size_t, std::size_t>;
+    std::map<DualEdge, std::size_t> polygon_incidence;
+    for (const CrossingEdge& crossing : crossing_edges) {
+        const auto& ring = crossing.incident_tets;
+        if (ring.size() < 3) {
+            continue;
+        }
+        // Count each undirected edge at most once per polygon. The closing
+        // pair is included because the polygon builder closes the ring.
+        std::vector<DualEdge> polygon_edges;
+        polygon_edges.reserve(ring.size());
+        for (std::size_t i = 0; i < ring.size(); ++i) {
+            const auto a = ring[i], b = ring[(i + 1) % ring.size()];
+            if (a != b) {
+                polygon_edges.emplace_back(std::min(a, b), std::max(a, b));
+            }
+        }
+        std::sort(polygon_edges.begin(), polygon_edges.end());
+        const auto unique_end = std::unique(polygon_edges.begin(), polygon_edges.end());
+        for (auto edge = polygon_edges.begin(); edge != unique_end; ++edge) {
+            ++polygon_incidence[*edge];
+        }
+    }
+
+    std::vector<bool> rejected(tet_count, false);
+    for (const auto& [edge, count] : polygon_incidence) {
+        if (count > 2) {
+            rejected[edge.first] = true;
+            rejected[edge.second] = true;
+        }
+    }
+    return rejected;
+}
+
 void append_surface_polygons(
     const std::vector<CrossingEdge>& crossing_edges,
     int requested_label,
     const mtet::MTetMesh& grid_mesh,
     std::vector<Vec3>& surface_vertices,
     const std::vector<std::size_t>& surface_vertex_by_tet,
+    const std::vector<bool>& rejected_tets,
     PolygonTriangulation triangulation,
     std::vector<Polygon>* output_polygons,
     std::vector<Triangle>& output_triangles) {
     for (const CrossingEdge& edge : crossing_edges) {
         if (edge.label != requested_label) {
+            continue;
+        }
+        // A missing vertex inside a ring must not be bridged across a cut.
+        if (!rejected_tets.empty() &&
+            std::any_of(edge.incident_tets.begin(), edge.incident_tets.end(),
+                        [&](std::size_t tet) { return rejected_tets[tet]; })) {
             continue;
         }
 
@@ -457,9 +500,14 @@ SurfaceMesh extract_height_ridges_from_grid(
 
     // 4. Create one dual vertex per active tetrahedron.
     SurfaceMesh surface;
+    const auto rejected_tets = options.reject_nonmanifold_junctions
+        ? find_nonmanifold_tetrahedra(crossing_edges, tet_count)
+        : std::vector<bool>{};
+    surface.rejected_nonmanifold_tets = std::count(rejected_tets.begin(), rejected_tets.end(), true);
     std::vector<std::size_t> surface_vertex_by_tet(tet_count, kNoSurfaceVertex);
     for (std::size_t tet_index = 0; tet_index < tet_count; ++tet_index) {
         if (crossing_count_by_tet[tet_index] == 0) continue;
+        if (!rejected_tets.empty() && rejected_tets[tet_index]) continue;
         surface_vertex_by_tet[tet_index] = surface.vertices.size();
         surface.vertices.push_back(
             crossing_sum_by_tet[tet_index] / static_cast<double>(crossing_count_by_tet[tet_index]));
@@ -471,12 +519,12 @@ SurfaceMesh extract_height_ridges_from_grid(
     const bool retain_polygons = options.retain_dual_polygons ||
         options.polygon_triangulation == PolygonTriangulation::polygons_only;
     append_surface_polygons(crossing_edges, 1, coarse_grid, surface.vertices,
-        surface_vertex_by_tet,
+        surface_vertex_by_tet, rejected_tets,
         options.polygon_triangulation,
         retain_polygons ? &surface.ridge_polygons : nullptr,
         surface.ridge_triangles);
     append_surface_polygons(crossing_edges, -1, coarse_grid, surface.vertices,
-        surface_vertex_by_tet,
+        surface_vertex_by_tet, rejected_tets,
         options.polygon_triangulation,
         retain_polygons ? &surface.valley_polygons : nullptr,
         surface.valley_triangles);

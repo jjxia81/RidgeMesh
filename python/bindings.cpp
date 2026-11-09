@@ -145,7 +145,8 @@ PYBIND11_MODULE(ridge_surface, module) {
         .def_readwrite("minimum_ridge_field_value", &SurfaceOptions::minimum_ridge_field_value)
         .def_readwrite("finite_difference_step", &SurfaceOptions::finite_difference_step)
         .def_readwrite("retain_dual_polygons", &SurfaceOptions::retain_dual_polygons)
-        .def_readwrite("polygon_triangulation", &SurfaceOptions::polygon_triangulation);
+        .def_readwrite("polygon_triangulation", &SurfaceOptions::polygon_triangulation)
+        .def_readwrite("reject_nonmanifold_junctions", &SurfaceOptions::reject_nonmanifold_junctions);
 
     py::class_<Triangle>(module, "Triangle")
         .def_readonly("indices", &Triangle::indices);
@@ -156,6 +157,7 @@ PYBIND11_MODULE(ridge_surface, module) {
     py::class_<SurfaceMesh>(module, "SurfaceMesh")
         .def_readonly("vertices", &SurfaceMesh::vertices)
         .def_readonly("dual_vertex_count", &SurfaceMesh::dual_vertex_count)
+        .def_readonly("rejected_nonmanifold_tets", &SurfaceMesh::rejected_nonmanifold_tets)
         .def_readonly("ridge_triangles", &SurfaceMesh::ridge_triangles)
         .def_readonly("valley_triangles", &SurfaceMesh::valley_triangles)
         .def_readonly("ridge_polygons", &SurfaceMesh::ridge_polygons)

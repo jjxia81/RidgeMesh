@@ -146,6 +146,9 @@ struct SurfaceOptions {
   double finite_difference_step = 1e-4; // only used by the scalar-field overload
   bool retain_dual_polygons = false;     // optional with fan modes; implied by polygons_only
   PolygonTriangulation polygon_triangulation = PolygonTriangulation::center_fan;
+  // Reject tetrahedra whose dual edge would be shared by more than two
+  // polygons. Incident polygons are omitted, leaving open boundaries.
+  bool reject_nonmanifold_junctions = false;
 };
 struct Triangle { std::array<std::size_t,3> indices; };
 struct Polygon { std::vector<std::size_t> indices; };
@@ -158,6 +161,7 @@ struct SurfaceMesh {
   std::vector<Triangle> valley_triangles;
   std::vector<Polygon> ridge_polygons;
   std::vector<Polygon> valley_polygons;
+  std::size_t rejected_nonmanifold_tets = 0;
 };
 
 // Wall-clock stage timings for one extraction. A zero refinement time means
