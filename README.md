@@ -3,8 +3,8 @@
 A C++20 implementation of the 3-D strong height ridge / valley surfacer in
 `height_ridge.nb`. It vendors MTet for tetrahedral connectivity and Eigen for
 symmetric Hessian eigendecomposition. MTet, Eigen, and pybind11 are Git
-submodules, so clone them together with the project; no system packages are
-required:
+submodules, so clone them together with the project; no system packages or
+solver libraries (including Ceres) are required:
 
 ```bash
 git clone --recurse-submodules https://github.com/jjxia81/RidgeMesh.git
@@ -404,6 +404,10 @@ The first `result.dual_vertex_count` entries of `result.vertices` are the
 tetrahedron dual vertices (averages of crossing points). With the default
 center-fan triangulation, the remaining entries are polygon centers;
 `ridge_triangles` and `valley_triangles` index the full vertex array.
+
+Ridge and valley junctions are retained even when their dual edges have more
+than two incident polygons. RidgeMesh does not reject or cut non-manifold
+junctions during extraction.
 
 ## Correspondence to the notebooks
 
