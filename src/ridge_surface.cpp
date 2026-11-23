@@ -309,7 +309,7 @@ SurfaceMesh extract_height_ridges_from_grid(
         std::mutex error_mutex;
         drjit::parallel_for(drjit::blocked_range<std::size_t>(0, vertices.size(), 1),
             [&](drjit::blocked_range<std::size_t> range) {
-                for (std::size_t index = range.begin(); index != range.end(); ++index) {
+                for (std::size_t index = range.begin(); index != *range.end(); ++index) {
                     try {
                         evaluated[index] = evaluate_vertex_sample(field, vertices[index].position);
                     } catch (...) {
@@ -434,7 +434,7 @@ SurfaceMesh extract_height_ridges_from_grid(
         std::mutex error_mutex;
         drjit::parallel_for(drjit::blocked_range<std::size_t>(0, grid_edges.size(), 64),
             [&](drjit::blocked_range<std::size_t> range) {
-                for (std::size_t index = range.begin(); index != range.end(); ++index) {
+                for (std::size_t index = range.begin(); index != *range.end(); ++index) {
                     try {
                         results[index] = evaluate_edge(grid_edges[index]);
                     } catch (...) {

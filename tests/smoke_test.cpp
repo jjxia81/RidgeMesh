@@ -6,6 +6,7 @@
 #include <map>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <mtet/grid.h>
 #include "ridge_surface/ridge_surface.hpp"

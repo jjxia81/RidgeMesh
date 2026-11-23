@@ -715,7 +715,7 @@ int refine_longest_edges_in_place(
         std::mutex error_mutex;
         drjit::parallel_for(drjit::blocked_range<std::size_t>(0, requests.size(), 1),
             [&](drjit::blocked_range<std::size_t> range) {
-                for (std::size_t index = range.begin(); index != range.end(); ++index) {
+                for (std::size_t index = range.begin(); index != *range.end(); ++index) {
                     try { evaluated[index] = evaluate_vertex_sample(field, requests[index].second); }
                     catch (...) { std::lock_guard lock(error_mutex); if (!evaluation_error) evaluation_error = std::current_exception(); }
                 }
@@ -746,7 +746,7 @@ int refine_longest_edges_in_place(
         std::mutex error_mutex;
         drjit::parallel_for(drjit::blocked_range<std::size_t>(0, batch.size(), 1),
             [&](drjit::blocked_range<std::size_t> range) {
-                for (std::size_t index = range.begin(); index != range.end(); ++index) {
+                for (std::size_t index = range.begin(); index != *range.end(); ++index) {
                     try {
                         const RefinementCandidate& candidate = batch[index];
                         if (!mesh.has_tet(candidate.tet_id)) continue;
@@ -801,7 +801,7 @@ int refine_longest_edges_in_place(
         std::vector<VertexSample> new_samples(new_vertices.size());
         drjit::parallel_for(drjit::blocked_range<std::size_t>(0, new_vertices.size(), 1),
             [&](drjit::blocked_range<std::size_t> range) {
-                for (std::size_t index = range.begin(); index != range.end(); ++index)
+                for (std::size_t index = range.begin(); index != *range.end(); ++index)
                     new_samples[index] = evaluate_vertex_sample(field, position_of(mesh, new_vertices[index]));
             });
         for (std::size_t index = 0; index < new_vertices.size(); ++index)
