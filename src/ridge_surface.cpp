@@ -6,6 +6,7 @@
 #include <nanothread/nanothread.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <exception>
@@ -187,6 +188,65 @@ bool find_refined_crossing(
     return true;
 }
 
+// Remove repeated consecutive indices, including the wrap-around pair. Welded
+// dual vertices make such repeats; each one would be a zero-area fan triangle.
+void remove_repeated_ring_vertices(std::vector<std::size_t>& ring) {
+    ring.erase(std::unique(ring.begin(), ring.end()), ring.end());
+    while (ring.size() > 1 && ring.front() == ring.back()) ring.pop_back();
+}
+
+// Flip whole rings so that every manifold dual edge (an edge used by exactly
+// two rings) is traversed in opposite directions. The grid-edge winding is
+// kept as the starting point; a component is flipped back if that changes
+// fewer rings. Non-orientable components keep one inconsistent seam, and
+// non-manifold edges do not propagate orientation.
+void orient_rings_consistently(std::vector<std::vector<std::size_t>>& rings) {
+    struct EdgeUse { std::size_t ring; bool forward; };
+    std::map<std::pair<std::size_t, std::size_t>, std::vector<EdgeUse>> edge_uses;
+    for (std::size_t ring_index = 0; ring_index < rings.size(); ++ring_index) {
+        const auto& ring = rings[ring_index];
+        for (std::size_t index = 0; index < ring.size(); ++index) {
+            const std::size_t a = ring[index], b = ring[(index + 1) % ring.size()];
+            edge_uses[{std::min(a, b), std::max(a, b)}].push_back({ring_index, a < b});
+        }
+    }
+    std::vector<std::vector<std::pair<std::size_t, bool>>> neighbors(rings.size());
+    for (const auto& [edge, uses] : edge_uses) {
+        if (uses.size() != 2 || uses[0].ring == uses[1].ring) continue;
+        // Same traversal direction means the two rings disagree.
+        const bool disagree = uses[0].forward == uses[1].forward;
+        neighbors[uses[0].ring].push_back({uses[1].ring, disagree});
+        neighbors[uses[1].ring].push_back({uses[0].ring, disagree});
+    }
+    constexpr int kUnvisited = -1;
+    std::vector<int> flip(rings.size(), kUnvisited);
+    std::vector<std::size_t> component, stack;
+    for (std::size_t seed = 0; seed < rings.size(); ++seed) {
+        if (flip[seed] != kUnvisited) continue;
+        component.clear();
+        flip[seed] = 0;
+        stack.push_back(seed);
+        while (!stack.empty()) {
+            const std::size_t ring_index = stack.back();
+            stack.pop_back();
+            component.push_back(ring_index);
+            for (const auto& [neighbor, disagree] : neighbors[ring_index]) {
+                if (flip[neighbor] != kUnvisited) continue;
+                flip[neighbor] = flip[ring_index] ^ static_cast<int>(disagree);
+                stack.push_back(neighbor);
+            }
+        }
+        std::size_t flipped = 0;
+        for (const std::size_t ring_index : component) flipped += flip[ring_index];
+        const bool invert = 2 * flipped > component.size();
+        for (const std::size_t ring_index : component) {
+            if ((flip[ring_index] != 0) != invert) {
+                std::reverse(rings[ring_index].begin(), rings[ring_index].end());
+            }
+        }
+    }
+}
+
 void append_surface_polygons(
     const std::vector<CrossingEdge>& crossing_edges,
     int requested_label,
@@ -194,8 +254,10 @@ void append_surface_polygons(
     std::vector<Vec3>& surface_vertices,
     const std::vector<std::size_t>& surface_vertex_by_tet,
     PolygonTriangulation triangulation,
+    bool clean_dual_mesh,
     std::vector<Polygon>* output_polygons,
     std::vector<Triangle>& output_triangles) {
+    std::vector<std::vector<std::size_t>> rings;
     for (const CrossingEdge& edge : crossing_edges) {
         if (edge.label != requested_label) {
             continue;
@@ -207,6 +269,7 @@ void append_surface_polygons(
                 ring.push_back(surface_vertex);
             }
         }
+        if (clean_dual_mesh) remove_repeated_ring_vertices(ring);
         if (ring.size() < 3) {
             continue;
         }
@@ -230,6 +293,16 @@ void append_surface_polygons(
         if (dot(area_vector, edge_axis) < 0.0) {
             std::reverse(ring.begin(), ring.end());
         }
+        rings.push_back(std::move(ring));
+    }
+    if (clean_dual_mesh) orient_rings_consistently(rings);
+
+    for (auto& ring : rings) {
+        Vec3 center;
+        for (const std::size_t vertex_index : ring) {
+            center += surface_vertices[vertex_index];
+        }
+        center = center / static_cast<double>(ring.size());
 
         if (output_polygons != nullptr) {
             output_polygons->push_back({ring});
@@ -457,11 +530,23 @@ SurfaceMesh extract_height_ridges_from_grid(
     // 4. Create one dual vertex per active tetrahedron.
     SurfaceMesh surface;
     std::vector<std::size_t> surface_vertex_by_tet(tet_count, kNoSurfaceVertex);
+    // With clean_dual_mesh, tets whose crossing means are bit-identical share
+    // one vertex. This happens at open boundaries, where neighboring tets around
+    // a grid edge often see only that edge's crossing point.
+    std::map<std::array<double, 3>, std::size_t> vertex_by_position;
     for (std::size_t tet_index = 0; tet_index < tet_count; ++tet_index) {
         if (crossing_count_by_tet[tet_index] == 0) continue;
-        surface_vertex_by_tet[tet_index] = surface.vertices.size();
-        surface.vertices.push_back(
-            crossing_sum_by_tet[tet_index] / static_cast<double>(crossing_count_by_tet[tet_index]));
+        const Vec3 position =
+            crossing_sum_by_tet[tet_index] / static_cast<double>(crossing_count_by_tet[tet_index]);
+        if (options.clean_dual_mesh) {
+            const auto [entry, inserted] = vertex_by_position.try_emplace(
+                std::array<double, 3>{position.x, position.y, position.z}, surface.vertices.size());
+            surface_vertex_by_tet[tet_index] = entry->second;
+            if (!inserted) continue;
+        } else {
+            surface_vertex_by_tet[tet_index] = surface.vertices.size();
+        }
+        surface.vertices.push_back(position);
     }
 
     surface.dual_vertex_count = surface.vertices.size();
@@ -471,12 +556,12 @@ SurfaceMesh extract_height_ridges_from_grid(
         options.polygon_triangulation == PolygonTriangulation::polygons_only;
     append_surface_polygons(crossing_edges, 1, coarse_grid, surface.vertices,
         surface_vertex_by_tet,
-        options.polygon_triangulation,
+        options.polygon_triangulation, options.clean_dual_mesh,
         retain_polygons ? &surface.ridge_polygons : nullptr,
         surface.ridge_triangles);
     append_surface_polygons(crossing_edges, -1, coarse_grid, surface.vertices,
         surface_vertex_by_tet,
-        options.polygon_triangulation,
+        options.polygon_triangulation, options.clean_dual_mesh,
         retain_polygons ? &surface.valley_polygons : nullptr,
         surface.valley_triangles);
     if (timings) {

@@ -290,6 +290,53 @@ int main() try {
   assert(!mesh.ridge_triangles.empty());
   assert(!mesh.ridge_polygons.empty());
 
+  {
+    // clean_dual_mesh: a ridge sphere is orientable, so after cleaning every
+    // manifold edge must be traversed in opposite directions, and no triangle
+    // may have two corners at the same position. Raw grid-edge winding is
+    // inconsistent on a sphere, which checks that the test is meaningful.
+    const ScalarField3D sphere_ridge([](const Vec3& p) {
+      const double r = std::sqrt(p.x * p.x + p.y * p.y + p.z * p.z) - 0.5;
+      return -r * r;
+    });
+    SurfaceOptions sphere_options{14, 13, 12};
+    sphere_options.surface_target = RefinementTarget::ridges;
+    const Bounds3D sphere_bounds{{-0.83, -0.81, -0.8}, {0.8, 0.82, 0.84}};
+    const auto winding_report = [](const SurfaceMesh& mesh) {
+      std::map<std::pair<std::size_t, std::size_t>, int> directed;
+      std::size_t degenerate = 0;
+      for (const Triangle& triangle : mesh.ridge_triangles) {
+        const auto& t = triangle.indices;
+        for (int k = 0; k < 3; ++k) {
+          ++directed[{t[k], t[(k + 1) % 3]}];
+          if (norm(mesh.vertices[t[k]] - mesh.vertices[t[(k + 1) % 3]]) == 0.0) ++degenerate;
+        }
+      }
+      // Two faces traversing the same directed edge disagree in winding.
+      std::size_t inconsistent = 0;
+      for (const auto& [edge, count] : directed) {
+        if (count > 1) ++inconsistent;
+      }
+      return std::make_pair(inconsistent, degenerate);
+    };
+    const auto cleaned = extract_height_ridges(sphere_ridge, sphere_bounds, sphere_options);
+    sphere_options.clean_dual_mesh = false;
+    const auto raw = extract_height_ridges(sphere_ridge, sphere_bounds, sphere_options);
+    const auto [clean_inconsistent, clean_degenerate] = winding_report(cleaned);
+    const auto [raw_inconsistent, raw_degenerate] = winding_report(raw);
+    (void)raw_degenerate;
+    if (cleaned.ridge_triangles.empty() || raw_inconsistent == 0) {
+      throw std::runtime_error("sphere ridge test lost its surface or its raw winding defect");
+    }
+    if (clean_inconsistent != 0 || clean_degenerate != 0) {
+      throw std::runtime_error("clean_dual_mesh left inconsistent winding or a zero-length edge: " +
+                               std::to_string(clean_inconsistent) + " / " + std::to_string(clean_degenerate));
+    }
+    if (cleaned.dual_vertex_count > raw.dual_vertex_count) {
+      throw std::runtime_error("clean_dual_mesh added dual vertices");
+    }
+  }
+
   DifferentialField3D analytic_field{
     [](const Vec3& p) { return Vec3{-2.0 * p.x, -0.2 * p.y, -0.1 * p.z}; },
     [](const Vec3&) { return Mat3{{{{-2, 0, 0}}, {{0, -0.2, 0}}, {{0, 0, -0.1}}}}; },

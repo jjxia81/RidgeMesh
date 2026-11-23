@@ -145,6 +145,7 @@ PYBIND11_MODULE(ridge_surface, module) {
         .def_readwrite("minimum_ridge_field_value", &SurfaceOptions::minimum_ridge_field_value)
         .def_readwrite("finite_difference_step", &SurfaceOptions::finite_difference_step)
         .def_readwrite("retain_dual_polygons", &SurfaceOptions::retain_dual_polygons)
+        .def_readwrite("clean_dual_mesh", &SurfaceOptions::clean_dual_mesh)
         .def_readwrite("polygon_triangulation", &SurfaceOptions::polygon_triangulation);
 
     py::class_<Triangle>(module, "Triangle")

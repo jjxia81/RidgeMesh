@@ -405,6 +405,14 @@ tetrahedron dual vertices (averages of crossing points). With the default
 center-fan triangulation, the remaining entries are polygon centers;
 `ridge_triangles` and `valley_triangles` index the full vertex array.
 
+`SurfaceOptions::clean_dual_mesh` (default on) merges dual vertices with
+bit-identical positions, which is common at open boundaries where neighboring
+tetrahedra see the same single crossing point. It then drops the repeated ring
+vertices that would become zero-area triangles, and flips whole polygons so
+manifold edges have consistent winding. No vertex moves. Set it to false for
+the raw output: one vertex per active tetrahedron, with each polygon wound by
+its grid-edge direction.
+
 Ridge and valley junctions are retained even when their dual edges have more
 than two incident polygons. RidgeMesh does not reject or cut non-manifold
 junctions during extraction.

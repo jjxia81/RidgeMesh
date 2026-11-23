@@ -146,6 +146,12 @@ struct SurfaceOptions {
   double finite_difference_step = 1e-4; // only used by the scalar-field overload
   bool retain_dual_polygons = false;     // optional with fan modes; implied by polygons_only
   PolygonTriangulation polygon_triangulation = PolygonTriangulation::center_fan;
+  // Clean the dual mesh before triangulation: merge dual vertices with
+  // bit-identical positions (no geometry moves), drop the repeated ring
+  // vertices that would make zero-area faces, and flip whole polygons so that
+  // manifold edges have consistent winding. Set false for the raw grid-edge
+  // winding and one vertex per active tetrahedron.
+  bool clean_dual_mesh = true;
 };
 struct Triangle { std::array<std::size_t,3> indices; };
 struct Polygon { std::vector<std::size_t> indices; };
@@ -170,7 +176,8 @@ struct ExtractionTimings {
 
 // Extract strong height ridges and valleys, following height_ridge.nb.
 // Requires C++20 because the internal MTet connectivity dependency uses it.
-// The output is a dual mesh: one vertex per active tetrahedron.
+// The output is a dual mesh: one vertex per active tetrahedron, shared by
+// tetrahedra with identical crossing means when clean_dual_mesh is on.
 SurfaceMesh extract_height_ridges(const DifferentialField3D& field,
                                   const Bounds3D& bounds,
                                   const SurfaceOptions& options = {},
