@@ -152,6 +152,13 @@ struct SurfaceOptions {
   // manifold edges have consistent winding. Set false for the raw grid-edge
   // winding and one vertex per active tetrahedron.
   bool clean_dual_mesh = true;
+  // Morphological closing of the crossing set before surfacing (Tao's
+  // mesh_morpho.nb): this many dilation rounds, then as many erosion rounds,
+  // separately for ridges and valleys. A dilation round extends every open
+  // sheet boundary by one grid triangle along the sheet's tangent plane, so
+  // gaps up to about 2*closing_rounds triangles wide close; erosion then pulls
+  // back the boundaries that met nothing. Zero disables closing.
+  int closing_rounds = 0;
 };
 struct Triangle { std::array<std::size_t,3> indices; };
 struct Polygon { std::vector<std::size_t> indices; };

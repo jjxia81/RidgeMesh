@@ -4,10 +4,12 @@
 #include <cassert>
 #include <cmath>
 #include <map>
+#include <set>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 #include <mtet/grid.h>
 #include "ridge_surface/ridge_surface.hpp"
 int main() try {
@@ -335,6 +337,60 @@ int main() try {
     if (cleaned.dual_vertex_count > raw.dual_vertex_count) {
       throw std::runtime_error("clean_dual_mesh added dual vertices");
     }
+  }
+
+  {
+    // closing_rounds: the ridge plane z = c with a strip |x - 0.05| < 0.1 cut
+    // out by the field-value gate. Without closing the sheet is two pieces;
+    // closing must rejoin them, and every new point must stay on the plane
+    // because dilation follows the tangent plane exactly.
+    constexpr double c = 0.013;
+    const DifferentialField3D slit_plane{
+      [](const Vec3& p) { return Vec3{0.0, 0.0, -2.0 * (p.z - c)}; },
+      [](const Vec3&) { return Mat3{{{{0, 0, 0}}, {{0, 0, 0}}, {{0, 0, -2}}}}; },
+      [](const Vec3& p) { return std::abs(p.x - 0.05) < 0.1 ? -1.0 : 1.0; },
+    };
+    SurfaceOptions slit_options{14, 13, 12};
+    slit_options.surface_target = RefinementTarget::ridges;
+    slit_options.minimum_ridge_field_value = 0.0;
+    const Bounds3D slit_bounds{{-0.83, -0.81, -0.8}, {0.8, 0.82, 0.84}};
+    const auto component_count = [](const SurfaceMesh& mesh) {
+      std::vector<std::size_t> parent(mesh.vertices.size());
+      for (std::size_t i = 0; i < parent.size(); ++i) parent[i] = i;
+      const auto find = [&](std::size_t i) {
+        while (parent[i] != i) i = parent[i] = parent[parent[i]];
+        return i;
+      };
+      std::set<std::size_t> used;
+      for (const Triangle& triangle : mesh.ridge_triangles) {
+        for (int k = 0; k < 3; ++k) {
+          used.insert(triangle.indices[k]);
+          parent[find(triangle.indices[k])] = find(triangle.indices[(k + 1) % 3]);
+        }
+      }
+      std::set<std::size_t> roots;
+      for (const std::size_t i : used) roots.insert(find(i));
+      return roots.size();
+    };
+    const auto open_sheet = extract_height_ridges(slit_plane, slit_bounds, slit_options);
+    slit_options.closing_rounds = 2;
+    const auto closed_sheet = extract_height_ridges(slit_plane, slit_bounds, slit_options);
+    if (component_count(open_sheet) != 2 || component_count(closed_sheet) != 1) {
+      throw std::runtime_error("closing did not rejoin the slit plane: " +
+                               std::to_string(component_count(open_sheet)) + " -> " +
+                               std::to_string(component_count(closed_sheet)) + " components");
+    }
+    for (const Vec3& v : closed_sheet.vertices) {
+      if (std::abs(v.z - c) > 1e-9) throw std::runtime_error("closing moved a vertex off the plane");
+    }
+    bool rejected = false;
+    try {
+      slit_options.closing_rounds = -1;
+      extract_height_ridges(slit_plane, slit_bounds, slit_options);
+    } catch (const std::invalid_argument&) {
+      rejected = true;
+    }
+    if (!rejected) throw std::runtime_error("negative closing_rounds was accepted");
   }
 
   DifferentialField3D analytic_field{

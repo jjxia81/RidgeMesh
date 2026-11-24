@@ -47,7 +47,11 @@ struct CrossingEdge {
 struct EdgeCrossingResult {
     Vec3 point;
     int label = 0; // Zero means the edge produced no accepted crossing.
+    Vec3 normal;   // Sheet normal at the crossing; only filled for morphology.
 };
+
+// A grid triangle (tetrahedron face) as three indices into the grid-edge list.
+using GridFace = std::array<std::size_t, 3>;
 
 mtet::MTetMesh make_kuhn_grid(const Bounds3D& bounds, int nx, int ny, int nz) {
     // MTet's TET6 is an oriented, six-tetrahedra-per-cell Kuhn grid.
@@ -59,25 +63,41 @@ mtet::MTetMesh make_kuhn_grid(const Bounds3D& bounds, int nx, int ny, int nz) {
 }
 
 // Build the compact edge -> incident-tetrahedra table needed for dual surfacing.
-std::vector<GridEdge> build_edge_adjacency(mtet::MTetMesh& mesh) {
+// When faces is non-null, also list every grid triangle (tetrahedron face) once,
+// as its three grid-edge indices; morphological operations walk these.
+std::vector<GridEdge> build_edge_adjacency(mtet::MTetMesh& mesh, std::vector<GridFace>* faces = nullptr) {
     std::map<std::pair<std::uint64_t, std::uint64_t>, std::size_t> edge_index_by_vertices;
     std::unordered_map<std::uint64_t, std::size_t> tet_index_by_id;
     std::vector<GridEdge> edges;
+    std::map<std::array<std::uint64_t, 3>, std::size_t> face_index_by_vertices;
+    const auto edge_key = [](std::uint64_t a, std::uint64_t b) {
+        return std::pair<std::uint64_t, std::uint64_t>{std::min(a, b), std::max(a, b)};
+    };
 
     std::size_t tet_index = 0;
     mesh.seq_foreach_tet([&](mtet::TetId tet_id, auto) {
         tet_index_by_id.emplace(tet_id.value_of(), tet_index++);
         mesh.foreach_edge_in_tet(tet_id, [&](mtet::EdgeId edge_id, mtet::VertexId first,
                                               mtet::VertexId second) {
-            const std::uint64_t first_id = first.value_of();
-            const std::uint64_t second_id = second.value_of();
-            const std::pair<std::uint64_t, std::uint64_t> key{
-                std::min(first_id, second_id), std::max(first_id, second_id)};
-            const auto [iterator, inserted] = edge_index_by_vertices.emplace(key, edges.size());
+            const auto [iterator, inserted] = edge_index_by_vertices.emplace(
+                edge_key(first.value_of(), second.value_of()), edges.size());
             if (inserted) {
                 edges.push_back({first, second, {}, edge_id});
             }
         });
+        if (faces == nullptr) return;
+        const auto tet = mesh.get_tet(tet_id);
+        const std::array<std::uint64_t, 4> v{
+            tet[0].value_of(), tet[1].value_of(), tet[2].value_of(), tet[3].value_of()};
+        for (int skipped = 0; skipped < 4; ++skipped) {
+            std::array<std::uint64_t, 3> f{};
+            for (int i = 0, j = 0; i < 4; ++i) if (i != skipped) f[j++] = v[i];
+            std::sort(f.begin(), f.end());
+            if (!face_index_by_vertices.emplace(f, faces->size()).second) continue;
+            faces->push_back({edge_index_by_vertices.at(edge_key(f[0], f[1])),
+                              edge_index_by_vertices.at(edge_key(f[0], f[2])),
+                              edge_index_by_vertices.at(edge_key(f[1], f[2]))});
+        }
     });
 
     // Preserve the topological one-ring order. Geometric angle sorting can
@@ -186,6 +206,91 @@ bool find_refined_crossing(
 
     crossing_point = interpolate_root(first_point, second_point, first_value, second_value);
     return true;
+}
+
+// ---- Morphological operations on grid-edge crossings (Tao's mesh_morpho.nb) ----
+// A grid triangle is "open" for a label when exactly one of its edges carries a
+// crossing of that label: the dual surface has a boundary edge there. Each round
+// reads the labels from the start of the round, so the result does not depend
+// on the order in which triangles are visited.
+
+// Dilation: in every open triangle, intersect the tangent plane at the crossing
+// (its point and sheet normal) with the triangle's other two edges. The edge it
+// crosses becomes a crossing with the plane's root point and the same normal.
+// Edges reached from several open triangles get the mean point and normal.
+// Edges carrying the other label are left alone. Returns the edges added.
+std::size_t dilate_crossings(std::vector<EdgeCrossingResult>& state, int label,
+                             const std::vector<GridFace>& faces,
+                             const std::vector<std::array<Vec3, 2>>& edge_endpoints) {
+    struct Accumulator { Vec3 point_sum, normal_sum; int count = 0; };
+    std::unordered_map<std::size_t, Accumulator> added;
+    for (const GridFace& face : faces) {
+        int crossing_count = 0;
+        std::size_t incoming = 0;
+        for (const std::size_t edge : face) {
+            if (state[edge].label == label) { ++crossing_count; incoming = edge; }
+        }
+        if (crossing_count != 1) continue;
+        const Vec3 point = state[incoming].point;
+        const Vec3 normal = state[incoming].normal;
+        std::size_t target = 0;
+        Vec3 target_point;
+        int candidates = 0;
+        for (const std::size_t edge : face) {
+            if (edge == incoming) continue;
+            const auto& [first, second] = edge_endpoints[edge];
+            const double first_value = dot(first - point, normal);
+            const double second_value = dot(second - point, normal);
+            if (first_value * second_value < 0.0) {
+                ++candidates;
+                target = edge;
+                target_point = interpolate_root(first, second, first_value, second_value);
+            }
+        }
+        // With a plane through a point of the incoming edge, exactly one other
+        // edge is crossed unless the plane does not separate the incoming edge.
+        // Then the extension is ambiguous (two edges) or empty; skip it.
+        if (candidates != 1 || state[target].label != 0) continue;
+        Accumulator& accumulator = added[target];
+        const Vec3 aligned = accumulator.count > 0 && dot(normal, accumulator.normal_sum) < 0.0
+            ? normal * -1.0 : normal;
+        accumulator.point_sum += target_point;
+        accumulator.normal_sum += aligned;
+        ++accumulator.count;
+    }
+    for (const auto& [edge, accumulator] : added) {
+        state[edge].label = label;
+        state[edge].point = accumulator.point_sum / static_cast<double>(accumulator.count);
+        state[edge].normal = normalized(accumulator.normal_sum);
+    }
+    return added.size();
+}
+
+// Erosion: remove the single crossing of every open triangle. Returns the edges removed.
+std::size_t erode_crossings(std::vector<EdgeCrossingResult>& state, int label,
+                            const std::vector<GridFace>& faces) {
+    std::vector<std::size_t> removed;
+    for (const GridFace& face : faces) {
+        int crossing_count = 0;
+        std::size_t crossing = 0;
+        for (const std::size_t edge : face) {
+            if (state[edge].label == label) { ++crossing_count; crossing = edge; }
+        }
+        if (crossing_count == 1) removed.push_back(crossing);
+    }
+    std::sort(removed.begin(), removed.end());
+    removed.erase(std::unique(removed.begin(), removed.end()), removed.end());
+    for (const std::size_t edge : removed) state[edge].label = 0;
+    return removed.size();
+}
+
+// Closing: `rounds` dilations, then `rounds` erosions. Fills gaps up to about
+// 2*rounds grid triangles wide while returning free boundaries to where they were.
+void close_crossings(std::vector<EdgeCrossingResult>& state, int label, int rounds,
+                     const std::vector<GridFace>& faces,
+                     const std::vector<std::array<Vec3, 2>>& edge_endpoints) {
+    for (int round = 0; round < rounds; ++round) dilate_crossings(state, label, faces, edge_endpoints);
+    for (int round = 0; round < rounds; ++round) erode_crossings(state, label, faces);
 }
 
 // Remove repeated consecutive indices, including the wrap-around pair. Welded
@@ -342,6 +447,7 @@ SurfaceMesh extract_height_ridges_from_grid(
     if (timings) *timings = {};
     if (!field.gradient || !field.hessian || coarse_grid.get_num_vertices() == 0 ||
         coarse_grid.get_num_tets() == 0 ||
+        options.closing_rounds < 0 ||
         options.longest_edge_refinement.max_splits < 0 ||
         options.longest_edge_refinement.minimum_edge_length < 0.0 ||
         !std::isfinite(options.longest_edge_refinement.minimum_edge_length) ||
@@ -425,7 +531,10 @@ SurfaceMesh extract_height_ridges_from_grid(
     std::vector<Vec3> crossing_sum_by_tet(tet_count);
     std::vector<int> crossing_count_by_tet(tet_count);
     std::vector<CrossingEdge> crossing_edges;
-    const std::vector<GridEdge> grid_edges = build_edge_adjacency(coarse_grid);
+    const bool use_closing = options.closing_rounds > 0;
+    std::vector<GridFace> grid_faces;
+    const std::vector<GridEdge> grid_edges =
+        build_edge_adjacency(coarse_grid, use_closing ? &grid_faces : nullptr);
     const auto& vertex_samples = samples_by_vertex_id;
 
     // This phase reads the finished grid and derivative cache; each edge is independent.
@@ -480,6 +589,11 @@ SurfaceMesh extract_height_ridges_from_grid(
                 return false;
             }
             result = {crossing_point, is_ridge ? 1 : -1};
+            if (use_closing) {
+                // The sheet normal is the curvature direction whose derivative vanishes.
+                result.normal = normalized(curvature_direction_at(field, crossing_point,
+                    first_sample.eigensystem.vectors[direction_index], is_ridge));
+            }
             return true;
         };
         if (ridge) {
@@ -501,8 +615,8 @@ SurfaceMesh extract_height_ridges_from_grid(
         }
     };
 
+    std::vector<EdgeCrossingResult> results(grid_edges.size());
     if (options.parallel_edge_crossings) {
-        std::vector<EdgeCrossingResult> results(grid_edges.size());
         std::exception_ptr evaluation_error;
         std::mutex error_mutex;
         drjit::parallel_for(drjit::blocked_range<std::size_t>(0, grid_edges.size(), 64),
@@ -517,14 +631,27 @@ SurfaceMesh extract_height_ridges_from_grid(
                 }
             });
         if (evaluation_error) std::rethrow_exception(evaluation_error);
-        // Reduce in grid-edge order to keep dual-vertex coordinates and face order stable.
-        for (std::size_t index = 0; index < grid_edges.size(); ++index) {
-            record_crossing(grid_edges[index], results[index]);
-        }
     } else {
-        for (const GridEdge& edge : grid_edges) {
-            record_crossing(edge, evaluate_edge(edge));
+        for (std::size_t index = 0; index < grid_edges.size(); ++index) {
+            results[index] = evaluate_edge(grid_edges[index]);
         }
+    }
+
+    // 3b. Optional morphological closing of the crossing set, per label.
+    if (use_closing) {
+        std::vector<std::array<Vec3, 2>> edge_endpoints(grid_edges.size());
+        for (std::size_t index = 0; index < grid_edges.size(); ++index) {
+            edge_endpoints[index] = {position_of(coarse_grid, grid_edges[index].first_vertex),
+                                     position_of(coarse_grid, grid_edges[index].second_vertex)};
+        }
+        for (const int label : {1, -1}) {
+            close_crossings(results, label, options.closing_rounds, grid_faces, edge_endpoints);
+        }
+    }
+
+    // Reduce in grid-edge order to keep dual-vertex coordinates and face order stable.
+    for (std::size_t index = 0; index < grid_edges.size(); ++index) {
+        record_crossing(grid_edges[index], results[index]);
     }
 
     // 4. Create one dual vertex per active tetrahedron.
